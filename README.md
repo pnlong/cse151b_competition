@@ -1,120 +1,94 @@
-# CSE 151B Competition — Starter Code
+# CSE 151B Spring 2026 — Math Reasoning Competition
 
-Open **`starter_code_cse151b_comp.ipynb`** to get started.
+Maximize the mathematical reasoning accuracy of **Qwen3-4B** on 893 private math problems spanning high school to graduate level. See `scratchpaper/directions.md` for the full competition spec and submission format.
 
-The notebook covers environment setup, inference with Qwen3-4B-Thinking (INT8), and scoring against the public dataset.
-
-## Contents
-
-| File | Description |
-|---|---|
-| `starter_code_cse151b_comp.ipynb` | Main entry point |
-| `judger.py` | Response scoring logic |
-| `utils.py` | Utilities used by `judger.py` |
-| `data/public.jsonl` | Public dataset with ground-truth answers |
-| `results/` | Output JSONL files written at runtime |
+**Environment**: `micromamba activate cse151b_competition`  (create once with `bash setup.sh`)
 
 ---
 
-## Overview
+## Strategy
 
-### Overview
-This competition challenges participants to improve the mathematical reasoning capabilities of a small-sized language model [Qwen3-4B]; using only model-intrinsic methods such as prompt engineering, supervised fine-tuning, and reinforcement learning. Reliable mathematical reasoning unlocks the potential for LLMs to accelerate scientific discovery, automate complex quantitative analysis, and serve as accessible problem-solving tools across STEM disciplines. Your approaches will be evaluated on unified accuracy from high-school to graduate level math problems.
-
-### Description
-
-Large language models have shown remarkable progress in mathematical reasoning, yet smaller, open-weight models still struggle with problems requiring multi-step logic, symbolic manipulation, and quantitative precision. This competition simulates the real-world demand for self-sufficient yet powerful small LLMs that can reason effectively without relying on larger models or external tools. You'll push the boundaries of what a 4-billion-parameter model can achieve on challenging math benchmarks without relying on external APIs or tool-augmented generation at test time.
-
-The evaluation combines multiple complementary benchmarks into a single unified accuracy metric. Problems span a range of mathematical domains, difficulty levels, and response formats, including both free-form and multiple-choice questions, to provide a comprehensive assessment of your model's reasoning capabilities.
-
-Participants may use any model-intrinsic strategy to improve performance, including but not limited to:
-
-1. **Prompt engineering** — chain-of-thought, few-shot exemplars, self-consistency, progressive-hint prompting, and other inference-time techniques
-2. **Supervised fine-tuning** — LoRA, QLoRA, or full fine-tuning on any publicly available training data
-3. **Reinforcement learning** — GRPO, DPO, outcome-based reward modeling, and related alignment methods
-
-External model calls, API access, and tool-augmented generation (e.g., code interpreters or calculators) are **not permitted** at inference time. Success requires extracting the most mathematical reasoning capability possible from a single mid-sized model through careful optimization.
-
-### Evaluation
-
-Submissions are evaluated using **unified accuracy**, calculated as the total number of correctly answered questions divided by the total number of questions across all benchmarks, with each question weighted equally regardless of source or difficulty.
-
-The public and private test sets follow similar distributions in terms of difficulty proportions, question domains, and response formats. The leaderboard reports accuracy on approximately 30% of the private test set. Submissions are unlimited throughout the competition. Final team rankings are determined by performance on the **full private test set**, which is revealed only after the submission deadline.
+1. **Prompt engineering + self-consistency** ✓ built
+2. **Knowledge distillation** — collect teacher traces → **SFT** ← *current stage*
+3. **Reinforcement learning (GRPO)** starting from the SFT checkpoint
 
 ---
 
-## Dataset Description
+## Repository Layout
 
-### Starter Template
-
-The Starter Code for the competition is present [here](https://github.com/brooksniu/151B_SP26_Competition). Refer to the notebook to understand our dataset and the data loading procedures.
-
-The dataset consists of mathematical reasoning problems spanning a range of mathematical domains and difficulty levels (high-school to graduate), and response formats. Each problem is provided in JSONL format, with one JSON object per line.
-
-### Data Fields
-
-- `id` — Unique integer identifier for each problem
-- `question` — The problem statement in LaTeX-formatted text. Free-form questions use `[ANS]` placeholders to indicate where answers are expected
-- `answer` — The ground truth answer. This is a list of strings for free-form questions (one per `[ANS]` placeholder), or a single letter (e.g., `"C"`) for multiple-choice questions
-- `options` — (*Multiple-choice only*) A list of candidate answer choices in LaTeX format
-
-### Question Formats
-
-**Free-form**: The model must produce one or more numerical or symbolic answers corresponding to the `[ANS]` placeholders in the question. A question may require a single answer or multiple answers.
-
-**Multiple-choice**: The model must select the correct option from a provided list. The answer is a single capital letter corresponding to the correct choice.
-
-### Example Entries
-
-Free-form (single answer):
-
-```json
-{"question": "Here is an expression with negative exponents.\n$\\frac{1}{(-8)^{-3}}=$ [ANS]\nEvaluate the expression.", "answer": ["-512"], "id": 4}
+```
+final/
+├── constants.py                  Project-wide constants (model ID, sampling params, prompts)
+├── config.py                     Loads .env → ROOT_DIR, STORAGE_DIR, all derived paths
+├── utils.py                      Math answer evaluation helpers (used by judger.py)
+├── judger.py                     Competition-provided answer judging logic — do not modify
+│
+├── data/
+│   ├── public.jsonl              1116 problems with ground-truth answers (local eval)
+│   └── private.jsonl             893 problems without answers (leaderboard submission)
+│
+├── inference/                    Baseline inference pipeline → README inside
+│   ├── infer.py                  Run Qwen3-4B with self-consistency voting → submission CSV
+│   ├── evaluate.py               Score a CSV against public.jsonl using Judger
+│   ├── utils.py                  Inference utilities (extraction, voting, prompt building, I/O)
+│   └── README.md
+│
+├── distill/                      Knowledge distillation pipeline → README inside
+│   ├── collect.py                Run a teacher model, save verified/pseudo-labeled traces
+│   ├── merge.py                  Combine all models' traces into one SFT JSONL dataset
+│   ├── utils.py                  Distillation utilities (re-exports inference/utils + extras)
+│   └── README.md
+│
+├── scratchpaper/                 Git-ignored notes and planning documents
+│   ├── directions.md             Official competition spec (preserved from original README)
+│   ├── game_plan.md              Strategy overview and next steps
+│   └── project_rules.md          Coding conventions and project norms
+│
+├── setup.sh                      One-time environment setup (micromamba + pip deps)
+├── .env                          Local directory paths (git-ignored)
+├── .env.example                  Committed template — fill in ROOT_DIR and STORAGE_DIR
+└── starter_code_cse151b_comp.ipynb  Original starter notebook (reference only)
 ```
 
-Free-form (multiple answers):
-
-```json
-{"question": "If $f(x)=4x^2+x+2$, find the following:\n(a) $f(3)=$ [ANS]\n(b) $f(-3)=$ [ANS]\n(c) $f(-2)=$ [ANS]", "answer": ["41", "35", "16"], "id": 2}
-```
-
-Multiple-choice:
-
-```json
-{"question": "Given $u(x, y) = x^3 + 6x^2y - 3xy^2 - 2y^3$, find the analytic function $f(z) = u + iv$ ...", "options": ["$$( 6+4i ) z^{5}$$", "$$( 1-2i ) z^{3}$$", ...], "answer": "C", "id": 1}
-```
-
-### Data Splits
-
-- **Public set**: Problems with ground truth answers provided, intended for development and validation
-- **Private set**: Problems without answers, used for leaderboard evaluation and final ranking. The private test set follows a similar distribution to the public set in terms of difficulty, domains, and question formats
-
-### Notes
-
-- Answers in the test set are withheld. Your submission should contain predicted answers for all test problems.
-- For free-form questions with multiple `[ANS]` placeholders, all sub-answers must be correct for the question to be marked as correct.
-
-### Submission Format
-
-The final output of your model should be a CSV file containing predictions for every problem in the private test set (`private.jsonl`). Each row of the CSV must include:
-
-- **id** — The unique integer identifier matching the id field in `private.jsonl`
-- **response** — The full response trace from your model, including any chain-of-thought or thinking tokens. This is the raw model output used to extract the final answer.
-
-The CSV should have the following header and structure:
-
-```csv
-id,response
-0,"Okay, let's try to solve this... [full reasoning trace] ... The answer is \boxed{42}"
-1,"This is a complex question... [full reasoning trace] ... \boxed{580, 660, 80}"
-```
-
-**Important notes:**
-
-- Since responses will typically contain commas, newlines, and special characters, make sure to properly quote and escape the `response` field (e.g., using standard CSV quoting with double quotes, escaping inner double quotes as `""`).
-- The `response` field should contain the **complete model output** — including all intermediate reasoning, chain-of-thought, and the final answer — not just the extracted answer.
-- Every `id` in `private.jsonl` must have a corresponding row in your submission file.
-- The final answer will be extracted from the response trace during evaluation. For free-form questions, all sub-answers must be correct. For multiple-choice questions, the selected letter must match the ground truth.
+Large artifacts (model weights, generated traces, results CSVs, checkpoints) live in `STORAGE_DIR` defined in `.env` — not in this repo.
 
 ---
 
+## Quick Start
+
+```bash
+# 1. Set up paths
+cp .env.example .env    # fill in ROOT_DIR and STORAGE_DIR
+
+# 2. Create environment (first time only)
+bash setup.sh
+
+# 3. Activate environment
+micromamba activate cse151b_competition
+
+# 3. Run inference on the private test set (submission)
+CUDA_VISIBLE_DEVICES=0 python inference/infer.py --gpu
+
+# 4. Run on public set and evaluate locally
+CUDA_VISIBLE_DEVICES=0 python inference/infer.py --gpu \
+    --data data/public.jsonl --output results/public.csv
+python inference/evaluate.py --results results/public.csv
+```
+
+See `inference/README.md` for full options including multi-GPU, quantization, and smoke-testing.
+
+---
+
+## Root-Level Modules
+
+### `constants.py`
+All numerical, boolean, and string constants — model ID, sampling parameters, vLLM settings, system prompts. Every script imports defaults from here rather than hardcoding values.
+
+### `config.py`
+Loads `.env` and exposes `ROOT_DIR`, `STORAGE_DIR`, and every derived sub-path used across the project (`PRIVATE_DATA`, `PUBLIC_DATA`, `RESULTS_DIR`, `DISTILL_DIR`, `CHECKPOINTS_DIR`, `HF_CACHE_DIR`). Call `ensure_storage_dirs()` once to initialize the storage layout.
+
+### `utils.py`
+Math answer parsing and normalization helpers shared with `judger.py`: `last_boxed_only_string`, `remove_boxed`, `fix_sqrt`, `fix_fracs`, and related utilities. **Do not modify** — imported by the competition-provided `judger.py`.
+
+### `judger.py`
+Competition-provided answer judging logic. Handles symbolic equivalence, numeric approximation, unit stripping, ordered/unordered list matching, and MCQ scoring. **Do not modify.**
