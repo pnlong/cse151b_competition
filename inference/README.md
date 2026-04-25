@@ -34,7 +34,10 @@ CUDA_VISIBLE_DEVICES=0,1 python inference/infer.py --gpu --tp 2
 **What it does conceptually:**
 
 1. **Loads** a JSONL dataset (default: `data/private.jsonl`).
-2. **Builds prompts** for each question using one of two system prompts (free-form vs. MCQ) drawn from `constants.py`. For free-form questions with multiple `[ANS]` slots, a per-question note is injected into the user message instructing the model to produce a single `\boxed{answer_1, answer_2, ...}`.
+2. **Builds prompts** for each question using either:
+   - the baseline two-prompt scheme from `constants.py` (free-form vs. MCQ), or
+   - the optional router (`inference/router.py`) that selects a format-first prompt (`fr_single`, `fr_multi`, `mcq_single`) and can append small topic refinements (stats/geometry/calculus/linear algebra).
+   For free-form questions with multiple `[ANS]` slots, a per-question note is injected into the user message instructing the model to produce a single `\boxed{answer_1, answer_2, ...}`.
 3. **Enables thinking mode** via `apply_chat_template(..., enable_thinking=True)` — Qwen3's native chain-of-thought mode, which produces a `<think>...</think>` block before the final answer. The full trace (thinking + answer) is kept as the submission response, since the evaluator extracts `\boxed{}` from anywhere in the text.
 4. **Generates N responses per question** (default N=16) by repeating each prompt N times in one big vLLM batch. vLLM's prefix cache means the shared prompt tokens are only computed once per unique question.
 5. **Votes** using self-consistency: extracts the `\boxed{}` answer from each of the N responses, normalizes lightly for comparison, and picks the plurality answer. The winning response (the full trace) is kept as the final output.
@@ -51,6 +54,10 @@ CUDA_VISIBLE_DEVICES=0,1 python inference/infer.py --gpu --tp 2
 | `--tp` | `1` | Tensor-parallel degree (must match number of visible GPUs) |
 | `--quantize` | off | INT8 via bitsandbytes — halves VRAM, ~1.5× slower |
 | `--limit` | off | Process only the first N questions (smoke-testing) |
+| `--use-router` | off | Enable prompt routing (format-first prompts + optional topic refinements) |
+| `--router-secondary-llm` | off | Use a tiny LLM to pick *secondary* topic tags (primary routing stays deterministic) |
+| `--router-model` | `Qwen/Qwen2.5-0.5B-Instruct` | Router model used only when `--router-secondary-llm` is enabled |
+| `--router-device` | `cpu` | Router device: `cpu` (safe) or `auto` |
 
 ---
 
@@ -109,6 +116,16 @@ Extends the repo-root `utils.py` (math answer helpers) with inference-specific f
 | `save_submission_csv(rows, path)` | Write `[{id, response}]` → competition CSV |
 
 ---
+
+## `router.py` — optional prompt router
+
+The router is designed to be **safe for scoring**:
+- **Primary routing is deterministic** (based on `options` and the number of `[ANS]` slots) to avoid format mistakes.
+- **Secondary tags are optional**:
+  - default: conservative keyword matching
+  - optional: `--router-secondary-llm` uses a small instruct model to emit a strict JSON decision, then appends the corresponding refinement snippets.
+
+In all cases, the generated system prompts are written to preserve `judger.py` extraction behavior by ensuring the model outputs exactly one final `\boxed{...}`.
 
 ## Project-wide modules (repo root)
 

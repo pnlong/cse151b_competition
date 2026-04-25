@@ -103,6 +103,17 @@ def parse_args():
                    help="Ignore existing output and reprocess all questions from scratch")
     p.add_argument("--limit",       type=int,   default=None,
                    help="Process only the first N questions (smoke-testing)")
+
+    # ── Prompt routing ────────────────────────────────────────────────────────
+    p.add_argument("--use-router", action="store_true",
+                   help="Enable prompt routing (format + optional topic refinements).")
+    p.add_argument("--router-secondary-llm", action="store_true",
+                   help="Use a lightweight LLM to choose secondary topic tags "
+                        "(primary routing remains deterministic).")
+    p.add_argument("--router-model", default="Qwen/Qwen2.5-0.5B-Instruct",
+                   help="Router model for --router-secondary-llm (default: Qwen2.5-0.5B-Instruct).")
+    p.add_argument("--router-device", default="cpu", choices=["cpu", "auto"],
+                   help="Device for router model: cpu (safe) or auto (uses available accelerators).")
     return p.parse_args()
 
 
@@ -171,6 +182,23 @@ def main():
     tokenizer.pad_token = tokenizer.eos_token
     print(f"      Tokenizer ready.")
 
+    # ── Router (optional) ─────────────────────────────────────────────────────
+    router = None
+    if args.use_router:
+        from inference.router import RuleBasedRouter, LLMSecondaryRouter, build_routed_prompts
+
+        if args.router_secondary_llm:
+            # NOTE: loading a second vLLM instance is typically heavy; we use a tiny HF model.
+            # This is usually only worthwhile if you think topic refinements help measurably.
+            router = LLMSecondaryRouter(
+                model=args.router_model,
+                device=("cpu" if args.router_device == "cpu" else "auto"),
+            )
+            print(f"[router] enabled (secondary tags via LLM: {args.router_model}, device={args.router_device})")
+        else:
+            router = RuleBasedRouter(enable_secondary_keywords=True)
+            print(f"[router] enabled (rule-based secondary tags)")
+
     # ── Load model ────────────────────────────────────────────────────────────
     print(f"[2/3] Loading model weights into {'GPU' if args.gpu else 'CPU'} memory...")
     print(f"      (Note: first run may take several extra minutes for torch compilation)")
@@ -219,17 +247,27 @@ def main():
 
         # Pre-tokenize once per unique prompt (avoids vLLM re-tokenising N copies)
         chunk_ids = []
-        for item in chunk:
-            system, user = build_prompt(
-                item["question"], item.get("options"),
-                SYSTEM_MATH, SYSTEM_MCQ, MULTI_ANS_NOTE,
-            )
-            text = apply_chat_template_safe(
-                tokenizer,
-                [{"role": "system", "content": system},
-                 {"role": "user",   "content": user}],
-            )
-            chunk_ids.append(tokenizer.encode(text, add_special_tokens=False))
+        if router is None:
+            for item in chunk:
+                system, user = build_prompt(
+                    item["question"], item.get("options"),
+                    SYSTEM_MATH, SYSTEM_MCQ, MULTI_ANS_NOTE,
+                )
+                text = apply_chat_template_safe(
+                    tokenizer,
+                    [{"role": "system", "content": system},
+                     {"role": "user",   "content": user}],
+                )
+                chunk_ids.append(tokenizer.encode(text, add_special_tokens=False))
+        else:
+            routed = build_routed_prompts(router, chunk)
+            for system, user in routed:
+                text = apply_chat_template_safe(
+                    tokenizer,
+                    [{"role": "system", "content": system},
+                     {"role": "user",   "content": user}],
+                )
+                chunk_ids.append(tokenizer.encode(text, add_special_tokens=False))
 
         all_prompts = [{"prompt_token_ids": ids} for ids in chunk_ids for _ in range(N)]
         outputs     = llm.generate(all_prompts, sampling_params=sampling_params)

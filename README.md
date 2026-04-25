@@ -31,6 +31,7 @@ final/
 │   ├── infer.py                  Run Qwen3-4B with self-consistency voting → submission CSV
 │   ├── evaluate.py               Score a CSV against public.jsonl using Judger
 │   ├── utils.py                  Inference utilities (extraction, voting, prompt building, I/O)
+│   ├── router.py                 Optional prompt router (format-first + topic refinements)
 │   └── README.md
 │
 ├── distill/                      Knowledge distillation pipeline → README inside
@@ -83,6 +84,12 @@ See `inference/README.md` for full options including multi-GPU, quantization, an
 
 ### `constants.py`
 All numerical, boolean, and string constants — model ID, sampling parameters, vLLM settings, system prompts. Every script imports defaults from here rather than hardcoding values.
+
+### `prompt/prompts.py`
+Router-oriented prompt library. Defines:
+- Primary, format-driven system prompts (`fr_single`, `fr_multi`, `mcq_single`)
+- Optional secondary refinement snippets (stats/geometry/calculus/linear algebra)
+- A lightweight router-classifier prompt that outputs strict JSON (used only if you enable LLM-based secondary routing)
 
 ### `config.py`
 Loads `.env` and exposes `ROOT_DIR`, `STORAGE_DIR`, and every derived sub-path used across the project (`PRIVATE_DATA`, `PUBLIC_DATA`, `RESULTS_DIR`, `DISTILL_DIR`, `CHECKPOINTS_DIR`, `HF_CACHE_DIR`). Call `ensure_storage_dirs()` once to initialize the storage layout.
