@@ -22,8 +22,14 @@ from __future__ import annotations
 
 import argparse
 import json
+import sys
 from pathlib import Path
 from typing import Any
+
+from pathlib import Path as _Path
+# Ensure repo root is importable when running as a script:
+#   python inference/test_router.py ...
+sys.path.insert(0, str(_Path(__file__).parent.parent))
 
 from inference.utils import load_jsonl
 from inference.router import (
