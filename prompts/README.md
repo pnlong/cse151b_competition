@@ -7,11 +7,38 @@ Organized by purpose.
 
 ```
 prompts/
+├── routing/
+│   └── prompts.py      Router-oriented prompt library (primary + secondary system prompts)
 └── distillation/
-    └── teacher.md      System prompt for knowledge distillation via Claude
+    ├── teacher.md      System prompt for knowledge distillation via Claude
+    └── solver.md       Sub-agent prompt for batch problem solving
 ```
 
 ## Subdirectories
+
+### `routing/`
+
+Prompt definitions and routing structures used by `inference/router.py` to select the
+appropriate system prompt for each problem at inference time.
+
+| Symbol | Type | Purpose |
+|--------|------|---------|
+| `PRIMARY_PROMPTS` | `dict` | Maps route keys (`fr_single`, `fr_multi`, `mcq_single`) to system prompt strings |
+| `SECONDARY_REFINEMENTS` | `dict` | Optional topic-specific addenda (stats, geometry, calculus, linear algebra) |
+| `SECONDARY_KEYWORDS` | `dict` | Conservative keyword lists used by the rule-based secondary router |
+| `ROUTER_SYSTEM` | `str` | System prompt for the lightweight LLM-based secondary classifier |
+| `ROUTER_USER_TEMPLATE` | `str` | User message template for the LLM router (formatted with `question` and `options`) |
+
+#### Routing logic
+
+The router selects a primary prompt based purely on answer format:
+- `options` present → `mcq_single` (letter inside `\boxed{}`)
+- 2+ `[ANS]` slots → `fr_multi` (all answers comma-separated in one `\boxed{}`)
+- otherwise → `fr_single` (single value in `\boxed{}`)
+
+Secondary refinement tags (`stats_inference`, `stats_descriptive`, `geometry`,
+`calculus`, `linear_algebra`) are optionally appended when a keyword match or a
+lightweight LLM classifier is confident.
 
 ### `distillation/`
 

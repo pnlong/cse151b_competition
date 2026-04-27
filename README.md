@@ -34,6 +34,13 @@ final/
 │   ├── router.py                 Optional prompt router (format-first + topic refinements)
 │   └── README.md
 │
+├── prompts/                      System prompts and instruction templates → README inside
+│   ├── routing/
+│   │   └── prompts.py            Router-oriented prompt library (primary + secondary prompts)
+│   └── distillation/
+│       ├── teacher.md            Orchestrator prompt for Claude-based distillation
+│       └── solver.md             Sub-agent prompt for batch problem solving
+│
 ├── distill/                      Knowledge distillation pipeline → README inside
 │   ├── collect.py                Run a teacher model, save verified/pseudo-labeled traces
 │   ├── merge.py                  Combine all models' traces into one SFT JSONL dataset
@@ -85,7 +92,7 @@ See `inference/README.md` for full options including multi-GPU, quantization, an
 ### `constants.py`
 All numerical, boolean, and string constants — model ID, sampling parameters, vLLM settings, system prompts. Every script imports defaults from here rather than hardcoding values.
 
-### `prompt/prompts.py`
+### `prompts/routing/prompts.py`
 Router-oriented prompt library. Defines:
 - Primary, format-driven system prompts (`fr_single`, `fr_multi`, `mcq_single`)
 - Optional secondary refinement snippets (stats/geometry/calculus/linear algebra)

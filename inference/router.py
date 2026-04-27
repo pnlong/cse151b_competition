@@ -16,7 +16,7 @@ from dataclasses import dataclass
 from typing import Any, Iterable, Optional
 
 from constants import ANS_PLACEHOLDER, MULTI_ANS_NOTE
-from prompt.prompts import (
+from prompts.routing.prompts import (
     PRIMARY_PROMPTS,
     SECONDARY_KEYWORDS,
     SECONDARY_REFINEMENTS,
