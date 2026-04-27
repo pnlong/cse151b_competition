@@ -30,6 +30,7 @@ SYSTEM_FR_SINGLE = (
     "- Put ONLY the final answer inside \\boxed{...} (no words).\n"
     "- Do not include any other \\boxed{} earlier in the response.\n"
     "- Use exact values (fractions, radicals, \\pi) when appropriate; otherwise a decimal is fine.\n"
+    "- Once you have written \\boxed{...}, stop immediately. Do not revise, second-guess, or add any text after the boxed answer.\n"
 )
 
 SYSTEM_FR_MULTI = (
@@ -40,6 +41,7 @@ SYSTEM_FR_MULTI = (
     "  Example: \\boxed{answer_1, answer_2, answer_3}\n"
     "- Put ONLY the answers inside \\boxed{...} (no labels like (a) or units unless required).\n"
     "- Do not include any other \\boxed{} earlier in the response.\n"
+    "- Once you have written \\boxed{...}, stop immediately. Do not revise, second-guess, or add any text after the boxed answer.\n"
 )
 
 SYSTEM_MCQ_SINGLE = (
@@ -48,6 +50,7 @@ SYSTEM_MCQ_SINGLE = (
     "- Put ONLY the letter (A, B, C, ...) inside \\boxed{...}. Example: \\boxed{C}\n"
     "- Do not include any other \\boxed{} earlier in the response.\n"
     "- Do NOT output the full option text; only output the letter.\n"
+    "- Once you have written \\boxed{...}, stop immediately. Do not revisit your choice or add any text after the boxed answer.\n"
 )
 
 # ── Optional refinements (secondary routing) ───────────────────────────────────

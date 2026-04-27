@@ -20,9 +20,9 @@ DEFAULT_TOP_K        = 20
 DEFAULT_MIN_P              = 0.0
 DEFAULT_PRESENCE_PENALTY   = 0.0
 DEFAULT_REPETITION_PENALTY = 1.0
-DEFAULT_GPU_UTIL           = 0.90   # fraction of GPU VRAM (non-quantized)
-DEFAULT_QUANTIZE_GPU_UTIL  = 0.50   # fraction of GPU VRAM (bitsandbytes INT8)
-DEFAULT_MAX_NUM_SEQS       = 256    # vLLM max concurrent sequences
+DEFAULT_GPU_UTIL           = 0.85   # fraction of GPU VRAM (non-quantized)
+DEFAULT_QUANTIZE_GPU_UTIL  = 0.85   # fraction of GPU VRAM (bitsandbytes INT8)
+DEFAULT_MAX_NUM_SEQS       = 64     # vLLM max concurrent sequences
 DEFAULT_MAX_NUM_BATCHED_TOKENS = 32768   # vLLM max tokens across one scheduler step
 
 # ── Answer format ──────────────────────────────────────────────────────────────
@@ -38,7 +38,9 @@ SYSTEM_MATH = (
     "You are an expert mathematician. Solve the problem step by step, "
     "showing your complete reasoning. "
     "Wrap your final answer inside \\boxed{}. "
-    "Be precise and double-check your answer before writing it."
+    "Be precise and double-check your answer before writing it. "
+    "Once you have written \\boxed{}, stop immediately — do not revise, "
+    "second-guess, or add any text after the boxed answer."
 )
 
 SYSTEM_MCQ = (
@@ -46,7 +48,9 @@ SYSTEM_MCQ = (
     "Carefully analyze the problem and each answer choice. "
     "Work through the problem step by step to determine the correct answer. "
     "At the end, output ONLY the letter of the correct choice inside \\boxed{}, "
-    "e.g. \\boxed{C}. Do not put anything else inside \\boxed{}."
+    "e.g. \\boxed{C}. Do not put anything else inside \\boxed{}. "
+    "Once you have written \\boxed{}, stop immediately — do not revisit "
+    "your choice or add any text after the boxed answer."
 )
 
 # Appended to the user message for multi-[ANS] free-form questions.

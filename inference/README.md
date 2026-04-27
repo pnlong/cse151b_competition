@@ -117,6 +117,34 @@ Extends the repo-root `utils.py` (math answer helpers) with inference-specific f
 
 ---
 
+## `starter.py` — starter-code baseline (Experiment 1a)
+
+Faithful port of `starter_code_cse151b_comp.ipynb` to a runnable script. Uses the original notebook's system prompts, model settings (`max_model_len=16384`, `enable_prefix_caching=False`), and N=1 generation (no self-consistency). Outputs a CSV compatible with `evaluate.py`.
+
+```bash
+# Run on public set (single GPU, quantized — matches notebook defaults)
+CUDA_VISIBLE_DEVICES=0 python inference/starter.py --gpu
+
+# Smoke-test (10 questions, no GPU)
+python inference/starter.py --limit 10 --output /tmp/starter_test.csv
+
+# Score
+python inference/evaluate.py \
+    --results /deepfreeze/pnlong/school/cse151b/final/results/starter_baseline.csv \
+    --model "Qwen3-4B" --checkpoint base --n-samples 1 \
+    --notes "starter code notebook baseline"
+```
+
+| Flag | Default | Description |
+|------|---------|-------------|
+| `--data` | `data/public.jsonl` | Input JSONL |
+| `--output` | `$STORAGE_DIR/results/starter_baseline.csv` | Output CSV |
+| `--gpu` | off | Enable GPU inference |
+| `--limit` | off | First N questions only |
+| `--no-quantize` | off | Disable INT8 (notebook uses quantization by default) |
+
+---
+
 ## `router.py` — optional prompt router
 
 The router is designed to be **safe for scoring**:

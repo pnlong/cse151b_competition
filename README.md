@@ -9,8 +9,24 @@ Maximize the mathematical reasoning accuracy of **Qwen3-4B** on 893 private math
 ## Strategy
 
 1. **Prompt engineering + self-consistency** ✓ built
-2. **Knowledge distillation** — collect teacher traces → **SFT** ← *current stage*
+2. **Knowledge distillation** ✓ built — collect teacher traces → **SFT** ← *current stage*
 3. **Reinforcement learning (GRPO)** starting from the SFT checkpoint
+
+---
+
+## Experiments
+
+See [`EXPERIMENTS.md`](EXPERIMENTS.md) for every experimental condition, the files it involves, exact reproduction commands, and results logged to `STORAGE_DIR/results/eval_log.csv`.
+
+| Experiment | Description | Status |
+|------------|-------------|--------|
+| 1a | Starter code (notebook baseline) | 🔲 to run |
+| 1b | N=1 greedy, no self-consistency | 🔲 to run |
+| 1c | Single system prompt, N=4 self-consistency | 🔲 to run |
+| 1d | Prompt routing, N=4 self-consistency | 🔲 to run |
+| 1e | Thinking mode off, N=4 self-consistency | 🔲 to run |
+| 2 | Knowledge distillation + SFT | ⚙ pipeline built, training not started |
+| 3 | Reinforcement learning (GRPO) | 🔲 not started |
 
 ---
 
@@ -18,6 +34,7 @@ Maximize the mathematical reasoning accuracy of **Qwen3-4B** on 893 private math
 
 ```
 final/
+├── EXPERIMENTS.md                All experimental conditions, run commands, and results log
 ├── constants.py                  Project-wide constants (model ID, sampling params, prompts)
 ├── config.py                     Loads .env → ROOT_DIR, STORAGE_DIR, all derived paths
 ├── utils.py                      Math answer evaluation helpers (used by judger.py)
@@ -28,6 +45,7 @@ final/
 │   └── private.jsonl             893 problems without answers (leaderboard submission)
 │
 ├── inference/                    Baseline inference pipeline → README inside
+│   ├── starter.py                Starter-code baseline (Exp 1a) — faithful port of the notebook
 │   ├── infer.py                  Run Qwen3-4B with self-consistency voting → submission CSV
 │   ├── evaluate.py               Score a CSV against public.jsonl using Judger
 │   ├── utils.py                  Inference utilities (extraction, voting, prompt building, I/O)
@@ -50,6 +68,7 @@ final/
 ├── scratchpaper/                 Git-ignored notes and planning documents
 │   ├── directions.md             Official competition spec (preserved from original README)
 │   ├── game_plan.md              Strategy overview and next steps
+│   ├── pipeline.md               End-to-end pipeline description for all stages
 │   └── project_rules.md          Coding conventions and project norms
 │
 ├── setup.sh                      One-time environment setup (micromamba + pip deps)
