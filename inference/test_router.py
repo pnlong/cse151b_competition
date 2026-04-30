@@ -5,7 +5,7 @@ Standalone router sanity test.
 This script does NOT load vLLM or the main Qwen3-4B model.
 It only exercises the routing logic:
 - primary route (deterministic: options / [ANS] count)
-- optional secondary tags (keyword-based or tiny LLM classifier)
+- topic label (topic_taxonomy.classify_problem, or optional tiny LLM with fallback)
 
 Examples:
   # Rule-based router only (no model downloads)
@@ -14,7 +14,7 @@ Examples:
   # Run on public set
   python inference/test_router.py --data data/public.jsonl --limit 20
 
-  # Enable tiny LLM to choose secondary tags (will download router model once)
+  # Enable tiny LLM to suggest topic (will download router model once)
   python inference/test_router.py --limit 5 --secondary-llm --router-device cpu
 """
 
@@ -44,7 +44,7 @@ def parse_args():
     p.add_argument("--data", default="data/public.jsonl", help="Input JSONL (default: data/public.jsonl)")
     p.add_argument("--limit", type=int, default=10, help="Number of questions to route (default: 10)")
     p.add_argument("--secondary-llm", action="store_true",
-                   help="Use a tiny LLM to choose secondary tags (downloads model once).")
+                   help="Use a tiny LLM to suggest topic (downloads model once; taxonomy fallback).")
     p.add_argument("--router-model", default="Qwen/Qwen2.5-0.5B-Instruct",
                    help="Router model for --secondary-llm (default: Qwen2.5-0.5B-Instruct).")
     p.add_argument("--router-device", default="cpu", choices=["cpu", "auto"],
@@ -71,7 +71,7 @@ def main():
             device=("cpu" if args.router_device == "cpu" else "auto"),
         )
     else:
-        router = RuleBasedRouter(enable_secondary_keywords=True)
+        router = RuleBasedRouter(enable_topic_refinements=True)
 
     decisions = router.route_batch(data)
     routed_prompts = build_routed_prompts(router, data)
@@ -82,7 +82,7 @@ def main():
             rec: dict[str, Any] = {
                 "id": item.get("id"),
                 "primary": dec.primary,
-                "secondary": dec.secondary,
+                "topic": dec.topic,
                 "n_ans": dec.n_ans,
                 "has_options": dec.has_options,
             }

@@ -35,6 +35,7 @@ See [`EXPERIMENTS.md`](EXPERIMENTS.md) for every experimental condition, the fil
 ```
 final/
 ├── EXPERIMENTS.md                All experimental conditions, run commands, and results log
+├── topic_taxonomy.py             Shared 20-topic classifier (router + classify_topics)
 ├── constants.py                  Project-wide constants (model ID, sampling params, prompts)
 ├── config.py                     Loads .env → ROOT_DIR, STORAGE_DIR, all derived paths
 ├── utils.py                      Math answer evaluation helpers (used by judger.py)
@@ -54,7 +55,7 @@ final/
 │
 ├── prompts/                      System prompts and instruction templates → README inside
 │   ├── routing/
-│   │   └── prompts.py            Router-oriented prompt library (primary + secondary prompts)
+│   │   └── prompts.py            Router prompts (primary + TOPIC_REFINEMENTS)
 │   └── distillation/
 │       ├── teacher.md            Orchestrator prompt for Claude-based distillation
 │       └── solver.md             Sub-agent prompt for batch problem solving
@@ -108,14 +109,17 @@ See `inference/README.md` for full options including multi-GPU, quantization, an
 
 ## Root-Level Modules
 
+### `topic_taxonomy.py`
+Shared 20-topic weighted-regex taxonomy: `TOPICS`, `classify(text)`, `classify_problem(question, options)`, and `CANONICAL_TOPIC_ORDER`. Used by `inference/router.py` and `analysis/classify_topics.py` so offline CSV labels match inference-time topic routing.
+
 ### `constants.py`
 All numerical, boolean, and string constants — model ID, sampling parameters, vLLM settings, system prompts. Every script imports defaults from here rather than hardcoding values.
 
 ### `prompts/routing/prompts.py`
 Router-oriented prompt library. Defines:
 - Primary, format-driven system prompts (`fr_single`, `fr_multi`, `mcq_single`)
-- Optional secondary refinement snippets (stats/geometry/calculus/linear algebra)
-- A lightweight router-classifier prompt that outputs strict JSON (used only if you enable LLM-based secondary routing)
+- Optional `TOPIC_REFINEMENTS` addenda keyed by `topic_taxonomy` labels (20 topics)
+- Optional LLM router prompt (`ROUTER_SYSTEM`) that outputs strict JSON with a `topic` field when using `--router-secondary-llm`
 
 ### `config.py`
 Loads `.env` and exposes `ROOT_DIR`, `STORAGE_DIR`, and every derived sub-path used across the project (`PRIVATE_DATA`, `PUBLIC_DATA`, `RESULTS_DIR`, `DISTILL_DIR`, `CHECKPOINTS_DIR`, `HF_CACHE_DIR`). Call `ensure_storage_dirs()` once to initialize the storage layout.

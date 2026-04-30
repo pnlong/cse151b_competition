@@ -3,8 +3,10 @@ Prompt routing for inference.
 
 Design goals:
 - Keep primary routing deterministic and cheap (based on `options` and `[ANS]` count).
-- Allow an optional lightweight LLM to add *secondary* topic tags (stats/geometry/...)
-  without risking format mistakes.
+- Attach optional topic refinements using the same 20-way ``topic_taxonomy`` scoring
+  as offline ``classify_topics.py`` (question + option text).
+- Optional lightweight LLM may override the topic label when confident; invalid
+  outputs fall back to the taxonomy classifier.
 - Produce prompts that match `judger.py` extraction expectations: a single final \\boxed{...}.
 """
 
@@ -12,17 +14,23 @@ from __future__ import annotations
 
 import json
 import re
+import sys
 from dataclasses import dataclass
-from typing import Any, Iterable, Optional
+from pathlib import Path
+from typing import Any, Optional
+
+_ROOT = Path(__file__).resolve().parent.parent
+if str(_ROOT) not in sys.path:
+    sys.path.insert(0, str(_ROOT))
 
 from constants import ANS_PLACEHOLDER, MULTI_ANS_NOTE
 from prompts.routing.prompts import (
     PRIMARY_PROMPTS,
-    SECONDARY_KEYWORDS,
-    SECONDARY_REFINEMENTS,
     ROUTER_SYSTEM,
     ROUTER_USER_TEMPLATE,
+    TOPIC_REFINEMENTS,
 )
+from topic_taxonomy import CANONICAL_TOPIC_ORDER, classify_problem
 
 
 def count_ans_slots(question: str) -> int:
@@ -38,38 +46,15 @@ def primary_route(question: str, options: Optional[list]) -> str:
     return "fr_single"
 
 
-def keyword_secondary_tags(question: str, options: Optional[list]) -> list[str]:
-    """Conservative keyword router for secondary tags."""
-    text = (question or "").lower()
-    if options:
-        # include options text lightly; it can contain keywords like "determinant"
-        try:
-            text += "\n" + "\n".join(str(o) for o in options).lower()
-        except Exception:
-            pass
-
-    tags: list[str] = []
-    for tag, kws in SECONDARY_KEYWORDS.items():
-        for kw in kws:
-            if kw.lower() in text:
-                tags.append(tag)
-                break
-    # stable order, unique
-    seen = set()
-    out = []
-    for t in tags:
-        if t not in seen:
-            seen.add(t)
-            out.append(t)
-    return out
-
-
-def compose_system(primary: str, secondary: Iterable[str]) -> str:
+def compose_system(
+    primary: str,
+    topic: str,
+    *,
+    enable_topic_refinements: bool = True,
+) -> str:
     sys = PRIMARY_PROMPTS[primary]
-    for tag in secondary:
-        ref = SECONDARY_REFINEMENTS.get(tag)
-        if ref:
-            sys += ref
+    if enable_topic_refinements:
+        sys += TOPIC_REFINEMENTS.get(topic, "")
     return sys
 
 
@@ -86,15 +71,20 @@ def build_user_prompt(question: str, options: Optional[list]) -> str:
     return question
 
 
+_ALLOWED_TOPICS = frozenset(CANONICAL_TOPIC_ORDER)
+
+
 @dataclass(frozen=True)
 class RouteDecision:
     primary: str
-    secondary: list[str]
+    topic: str
     n_ans: int
     has_options: bool
 
 
 class BaseRouter:
+    enable_topic_refinements: bool = True
+
     def route_one(self, question: str, options: Optional[list]) -> RouteDecision:
         raise NotImplementedError
 
@@ -103,33 +93,34 @@ class BaseRouter:
 
 
 class RuleBasedRouter(BaseRouter):
-    def __init__(self, enable_secondary_keywords: bool = True):
-        self.enable_secondary_keywords = enable_secondary_keywords
+    """Deterministic format routing + taxonomy topic label (``classify_problem``)."""
+
+    def __init__(self, enable_topic_refinements: bool = True):
+        self.enable_topic_refinements = enable_topic_refinements
 
     def route_one(self, question: str, options: Optional[list]) -> RouteDecision:
         p = primary_route(question, options)
-        sec = keyword_secondary_tags(question, options) if self.enable_secondary_keywords else []
+        topic = classify_problem(question, options)
         return RouteDecision(
             primary=p,
-            secondary=sec,
+            topic=topic,
             n_ans=count_ans_slots(question),
             has_options=bool(options),
         )
 
 
-class LLMSecondaryRouter(BaseRouter):
+class LLMTopicRouter(BaseRouter):
     """
-    Uses a lightweight LLM to choose *secondary* tags.
-
-    Primary routing remains deterministic (format-based) to avoid LLM mistakes that
-    would break the answer format.
+    Primary routing stays deterministic. A lightweight LLM may suggest a topic;
+    invalid or empty suggestions fall back to ``classify_problem``.
     """
 
-    def __init__(self, model: str, device: str = "cpu"):
+    def __init__(self, model: str, device: str = "cpu", enable_topic_refinements: bool = True):
         from transformers import AutoModelForCausalLM, AutoTokenizer
 
         self.model_name = model
         self.device = device
+        self.enable_topic_refinements = enable_topic_refinements
         self.tokenizer = AutoTokenizer.from_pretrained(model, trust_remote_code=True)
         self.model = AutoModelForCausalLM.from_pretrained(
             model,
@@ -139,18 +130,14 @@ class LLMSecondaryRouter(BaseRouter):
         if device == "cpu":
             self.model.to("cpu")
         self.model.eval()
-
-        # Conservative generation defaults: deterministic JSON
-        self.max_new_tokens = 128
+        self.max_new_tokens = 256
 
     def _extract_json(self, text: str) -> dict[str, Any] | None:
         text = text.strip()
-        # Try direct parse
         try:
             return json.loads(text)
         except Exception:
             pass
-        # Try to find first {...} block
         m = re.search(r"\{[\s\S]*\}", text)
         if not m:
             return None
@@ -159,7 +146,7 @@ class LLMSecondaryRouter(BaseRouter):
         except Exception:
             return None
 
-    def _secondary_from_llm(self, question: str, options: Optional[list]) -> list[str]:
+    def _topic_from_llm(self, question: str, options: Optional[list]) -> str | None:
         user = ROUTER_USER_TEMPLATE.format(question=question, options=options)
         messages = [
             {"role": "system", "content": ROUTER_SYSTEM},
@@ -169,9 +156,6 @@ class LLMSecondaryRouter(BaseRouter):
         inputs = self.tokenizer(prompt, return_tensors="pt")
         if self.device == "cpu":
             inputs = {k: v.to("cpu") for k, v in inputs.items()}
-        else:
-            # Let HF handle device placement if using device_map="auto"
-            pass
 
         out = self.model.generate(
             **inputs,
@@ -182,41 +166,47 @@ class LLMSecondaryRouter(BaseRouter):
         decoded = self.tokenizer.decode(out[0][inputs["input_ids"].shape[1] :], skip_special_tokens=True)
         obj = self._extract_json(decoded)
         if not isinstance(obj, dict):
-            return []
-        sec = obj.get("secondary", [])
-        if not isinstance(sec, list):
-            return []
-        # Filter to allowed
-        allowed = set(SECONDARY_REFINEMENTS.keys())
-        out_sec: list[str] = []
-        for t in sec:
-            if isinstance(t, str) and t in allowed and t not in out_sec:
-                out_sec.append(t)
-        return out_sec
+            return None
+        raw = obj.get("topic", "")
+        if raw is None:
+            return None
+        if not isinstance(raw, str):
+            return None
+        raw = raw.strip()
+        if not raw:
+            return None
+        if raw in _ALLOWED_TOPICS:
+            return raw
+        return None
 
     def route_one(self, question: str, options: Optional[list]) -> RouteDecision:
         p = primary_route(question, options)
-        sec = self._secondary_from_llm(question, options)
-        # Fallback: if LLM returns nothing, use conservative keyword tags
-        if not sec:
-            sec = keyword_secondary_tags(question, options)
+        topic = self._topic_from_llm(question, options)
+        if topic is None:
+            topic = classify_problem(question, options)
         return RouteDecision(
             primary=p,
-            secondary=sec,
+            topic=topic,
             n_ans=count_ans_slots(question),
             has_options=bool(options),
         )
 
 
+# Backwards-compatible alias
+LLMSecondaryRouter = LLMTopicRouter
+
+
 def build_routed_prompts(router: BaseRouter, items: list[dict[str, Any]]) -> list[tuple[str, str]]:
-    """
-    Returns list of (system_prompt, user_prompt) for each item in `items`.
-    """
+    """Returns list of (system_prompt, user_prompt) for each item in `items`."""
     decisions = router.route_batch(items)
     out: list[tuple[str, str]] = []
+    enable = getattr(router, "enable_topic_refinements", True)
     for it, dec in zip(items, decisions):
-        system = compose_system(dec.primary, dec.secondary)
+        system = compose_system(
+            dec.primary,
+            dec.topic,
+            enable_topic_refinements=enable,
+        )
         user = build_user_prompt(it["question"], it.get("options"))
         out.append((system, user))
     return out
-

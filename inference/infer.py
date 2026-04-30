@@ -108,8 +108,8 @@ def parse_args():
     p.add_argument("--use-router", action="store_true",
                    help="Enable prompt routing (format + optional topic refinements).")
     p.add_argument("--router-secondary-llm", action="store_true",
-                   help="Use a lightweight LLM to choose secondary topic tags "
-                        "(primary routing remains deterministic).")
+                   help="Use a lightweight LLM to suggest a topic label; invalid output "
+                        "falls back to topic_taxonomy.classify_problem (primary route stays deterministic).")
     p.add_argument("--router-model", default="Qwen/Qwen2.5-0.5B-Instruct",
                    help="Router model for --router-secondary-llm (default: Qwen2.5-0.5B-Instruct).")
     p.add_argument("--router-device", default="cpu", choices=["cpu", "auto"],
@@ -194,10 +194,10 @@ def main():
                 model=args.router_model,
                 device=("cpu" if args.router_device == "cpu" else "auto"),
             )
-            print(f"[router] enabled (secondary tags via LLM: {args.router_model}, device={args.router_device})")
+            print(f"[router] enabled (topic via LLM with taxonomy fallback: {args.router_model}, device={args.router_device})")
         else:
-            router = RuleBasedRouter(enable_secondary_keywords=True)
-            print(f"[router] enabled (rule-based secondary tags)")
+            router = RuleBasedRouter(enable_topic_refinements=True)
+            print(f"[router] enabled (topic_taxonomy + optional refinements)")
 
     # ── Load model ────────────────────────────────────────────────────────────
     print(f"[2/3] Loading model weights into {'GPU' if args.gpu else 'CPU'} memory...")

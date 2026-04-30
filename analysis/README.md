@@ -14,13 +14,13 @@ Paths to the JSONL files come from [`config.py`](../config.py) (via `.env` → `
 
 | Script | Purpose |
 |--------|---------|
-| [`dataset_breakdown.py`](dataset_breakdown.py) | Summarizes **answer format** (MCQ vs free-form single vs multi-`[ANS]`) using `primary_route` on the JSONL fields. **Topic** bars come from either (**default**) inference **secondary keywords** via [`RuleBasedRouter`](../inference/router.py) — sparse 5-topic hints — or from **`--source csv`** reading [`data/topic_classifications.csv`](../data/topic_classifications.csv) (20 mutually exclusive topics from `classify_topics.py`). Prints tables to stdout and optionally saves a **two-panel horizontal bar chart**. |
-| [`classify_topics.py`](classify_topics.py) | Offline **20-topic** taxonomy via weighted keyword scoring (not used at inference). Writes [`data/topic_classifications.csv`](../data/topic_classifications.csv) with columns `set`, `id`, `topic`. |
+| [`dataset_breakdown.py`](dataset_breakdown.py) | Summarizes **answer format** (MCQ vs free-form single vs multi-`[ANS]`) using `primary_route` on the JSONL fields. **Topic** bars come from either (**default**) the inference router’s `topic_taxonomy.classify_problem` label (same 20-way scoring as the CSV pipeline) via [`RuleBasedRouter`](../inference/router.py), or from **`--source csv`** reading [`data/topic_classifications.csv`](../data/topic_classifications.csv) (offline run of `classify_topics.py`). Prints tables to stdout and optionally saves a **two-panel horizontal bar chart**. |
+| [`classify_topics.py`](classify_topics.py) | Offline CLI: writes [`data/topic_classifications.csv`](../data/topic_classifications.csv) with columns `set`, `id`, `topic`. Scoring rules live in repo-root [`topic_taxonomy.py`](../topic_taxonomy.py). |
 
 ### `dataset_breakdown.py`
 
-- **`--source router`** (default): topic bars = inference router secondary keywords (may overlap per problem; many rows end up as “None”).
-- **`--source csv`**: topic bars = labels from `topic_classifications.csv` (exactly one topic per problem). Requires the CSV to exist — run `classify_topics.py` first.
+- **`--source router`** (default): topic bars = one label per problem from `RuleBasedRouter` / `topic_taxonomy` (counts sum to *n* per split, same as CSV mode).
+- **`--source csv`**: topic bars = labels from `topic_classifications.csv`. Requires the CSV — run `classify_topics.py` first.
 - **`--classifications PATH`**: CSV path when using `--source csv` (default: `data/topic_classifications.csv`).
 - **`--plot-top N`**: figure only — show the **`N` topics with the largest counts on the private split** (ties broken alphabetically). `0` = show every topic that appears in either split. Stdout tables still list all topics; omitted topics are summarized after the tables when `N > 0`.
 - **Format breakdown** is always computed from the JSONL (`primary_route`), independent of `--source`.
@@ -34,7 +34,7 @@ python analysis/dataset_breakdown.py --source csv --classifications data/topic_c
 
 ### `classify_topics.py`
 
-- Regenerates the topic CSV from scratch each run (overwrites by default).
+- Regenerates the topic CSV from scratch each run (overwrites by default). Uses `topic_taxonomy.classify_problem` so question + option text match inference routing.
 
 ```bash
 python analysis/classify_topics.py
@@ -46,7 +46,7 @@ python analysis/classify_topics.py --output data/topic_classifications.csv
 ## Generated artifacts
 
 | Artifact | Produced by | Notes |
-|----------|-------------|--------|
+|----------|-------------|-------|
 | `analysis/breakdown.pdf` (or similar) | `dataset_breakdown.py --output …` | Git-ignored if you add patterns in `.gitignore`; optional to commit. |
 | `data/topic_classifications.csv` | `classify_topics.py` | One row per problem: `public`/`private`, numeric `id`, single `topic` label. |
 
@@ -54,8 +54,8 @@ python analysis/classify_topics.py --output data/topic_classifications.csv
 
 ## Dependencies
 
-- **Shared**: `matplotlib`, `seaborn`, project imports (`config`, `inference.router`).
-- **`dataset_breakdown.py`**: `--source csv` imports [`classify_topics.py`](classify_topics.py) only for `CANONICAL_TOPIC_ORDER` (topic label ordering).
-- **`classify_topics.py`**: standard library only beyond project modules.
+- **Shared**: `matplotlib`, `seaborn`, project imports (`config`, `inference.router`, `topic_taxonomy`).
+- **`dataset_breakdown.py`**: imports `CANONICAL_TOPIC_ORDER` from `topic_taxonomy` for topic label ordering.
+- **`classify_topics.py`**: standard library + `topic_taxonomy`, `config`.
 
 If plotting fails, ensure matplotlib has a backend (e.g. use `--output` for non-interactive PDF/PNG on headless machines).

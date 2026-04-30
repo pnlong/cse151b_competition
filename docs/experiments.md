@@ -87,12 +87,13 @@ python inference/evaluate.py \
 
 ### 1d. Prompt routing, N=4 self-consistency
 
-Replaces the single system prompt pair with a format-first router that selects among `fr_single`, `fr_multi`, and `mcq_single` prompts based on question format, and optionally appends topic-specific refinement snippets (geometry, statistics, calculus, linear algebra) detected by keyword matching.
+Replaces the single system prompt pair with a format-first router that selects among `fr_single`, `fr_multi`, and `mcq_single` prompts based on question format, and optionally appends topic-specific refinement snippets. Topics are one of 20 curriculum labels from `topic_taxonomy.classify_problem` (same weighted-regex scoring as `analysis/classify_topics.py`).
 
 **Relevant files**:
 - `inference/infer.py` — `--use-router` flag
-- `inference/router.py` — deterministic primary routing + optional keyword secondary tags
-- `prompts/routing/prompts.py` — `PRIMARY_PROMPTS`, `SECONDARY_*` snippets
+- `inference/router.py` — deterministic primary routing + `classify_problem` (or optional LLM topic with fallback)
+- `topic_taxonomy.py` — shared `TOPICS` weights and `classify` / `classify_problem`
+- `prompts/routing/prompts.py` — `PRIMARY_PROMPTS`, `TOPIC_REFINEMENTS`
 - `constants.py` — fallback prompts
 
 **How to run**:
@@ -106,7 +107,7 @@ CUDA_VISIBLE_DEVICES=0 python inference/infer.py --gpu --quantize \
 python inference/evaluate.py \
     --results /deepfreeze/pnlong/school/cse151b/final/results/public_router_n4.csv \
     --model "Qwen3-4B" --checkpoint base --n-samples 4 \
-    --notes "prompt routing (keyword secondary), self-consistency N=4, thinking on"
+    --notes "prompt routing (topic_taxonomy + refinements), self-consistency N=4, thinking on"
 ```
 
 To test routing in isolation without loading the main model:

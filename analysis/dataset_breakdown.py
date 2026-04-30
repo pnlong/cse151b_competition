@@ -4,8 +4,8 @@ Dataset breakdown — topic charts from the inference router or from topic_class
 
 Two modes (--source):
 
-  router — Uses `RuleBasedRouter` secondary keyword tags (five narrow topics + “None”).
-           Topics can overlap per problem. Matches inference-time prompt routing.
+  router — Uses `RuleBasedRouter` topic label from ``topic_taxonomy.classify_problem``
+           (same 20-way scoring as ``classify_topics.py`` / CSV). One topic per problem.
 
   csv    — Reads `data/topic_classifications.csv` (from `analysis/classify_topics.py`).
            Twenty mutually exclusive keyword-scored topics per problem.
@@ -39,7 +39,7 @@ import matplotlib.pyplot as plt
 import matplotlib.ticker as mticker
 import seaborn as sns
 
-from classify_topics import CANONICAL_TOPIC_ORDER
+from topic_taxonomy import CANONICAL_TOPIC_ORDER
 from config import PUBLIC_DATA, PRIVATE_DATA
 from inference.router import RuleBasedRouter, primary_route
 
@@ -49,24 +49,6 @@ _PRIMARY_LABELS: dict[str, str] = {
     "mcq_single": "MCQ",
     "fr_single":  "Free-form (single answer)",
     "fr_multi":   "Free-form (multi-answer)",
-}
-
-# Router secondary labels (display order for bars)
-_ROUTER_TOPIC_ORDER: list[str] = [
-    "Linear Algebra",
-    "Stats – Descriptive",
-    "Stats – Inference",
-    "Calculus",
-    "Geometry",
-    "None",
-]
-
-_SECONDARY_TO_TOPIC: dict[str, str] = {
-    "geometry":          "Geometry",
-    "calculus":          "Calculus",
-    "stats_inference":   "Stats – Inference",
-    "stats_descriptive": "Stats – Descriptive",
-    "linear_algebra":    "Linear Algebra",
 }
 
 DEFAULT_CLASSIFICATIONS_CSV = REPO_ROOT / "data" / "topic_classifications.csv"
@@ -109,22 +91,15 @@ def _format_counts_for_items(items: list[dict]) -> Counter:
 
 
 def analyze_router(items: list[dict]) -> AnalysisResult:
-    """Secondary-keyword topics from RuleBasedRouter (may overlap); 'None' if no tag."""
-    router = RuleBasedRouter(enable_secondary_keywords=True)
+    """One topic per problem via ``RuleBasedRouter`` (same taxonomy as CSV pipeline)."""
+    router = RuleBasedRouter(enable_topic_refinements=True)
     topic_counts: Counter = Counter()
     format_counts: Counter = Counter()
 
     for item in items:
         dec = router.route_one(item["question"], item.get("options"))
         format_counts[_PRIMARY_LABELS.get(dec.primary, dec.primary)] += 1
-
-        if dec.secondary:
-            for tag in dec.secondary:
-                mapped = _SECONDARY_TO_TOPIC.get(tag)
-                if mapped:
-                    topic_counts[mapped] += 1
-        else:
-            topic_counts["None"] += 1
+        topic_counts[dec.topic] += 1
 
     return AnalysisResult(topic_counts, format_counts, len(items))
 
@@ -337,7 +312,7 @@ def main() -> None:
         "--source",
         choices=("router", "csv"),
         default="router",
-        help="router: inference keyword secondary tags (default). "
+        help="router: same 20-topic taxonomy as classify_topics (RuleBasedRouter). "
              "csv: topic_classifications.csv from classify_topics.py.",
     )
     parser.add_argument(
@@ -372,14 +347,14 @@ def main() -> None:
     print(f"  Private: {len(private_items):,} problems")
 
     if args.source == "router":
-        print("Analyzing (inference router secondary keywords) …")
+        print("Analyzing (inference router + topic_taxonomy) …")
         public_result  = analyze_router(public_items)
         private_result = analyze_router(private_items)
-        topic_order_full = list(_ROUTER_TOPIC_ORDER)
+        topic_order_full = list(CANONICAL_TOPIC_ORDER)
         router_mode = True
         topic_header = (
-            "── Topic breakdown (router secondary keywords; "
-            "may overlap — counts need not sum to n) ──"
+            "── Topic breakdown (router: topic_taxonomy.classify_problem; "
+            "one topic per problem) ──"
         )
     else:
         if not args.classifications.is_file():
@@ -404,7 +379,7 @@ def main() -> None:
 
     print(f"\n{topic_header}")
     if router_mode:
-        print("  (Router topics may overlap; bar totals need not sum to n per split.)")
+        print("  (Same scoring weights as offline classify_topics.py when option text is included.)")
     else:
         print("  (CSV assigns exactly one topic per problem; counts sum to n per split.)")
 

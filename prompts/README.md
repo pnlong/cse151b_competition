@@ -8,7 +8,7 @@ Organized by purpose.
 ```
 prompts/
 ├── routing/
-│   └── prompts.py      Router-oriented prompt library (primary + secondary system prompts)
+│   └── prompts.py      Router-oriented prompt library (primary + topic refinements)
 └── distillation/
     ├── teacher.md      System prompt for knowledge distillation via Claude
     └── solver.md       Sub-agent prompt for batch problem solving
@@ -24,10 +24,11 @@ appropriate system prompt for each problem at inference time.
 | Symbol | Type | Purpose |
 |--------|------|---------|
 | `PRIMARY_PROMPTS` | `dict` | Maps route keys (`fr_single`, `fr_multi`, `mcq_single`) to system prompt strings |
-| `SECONDARY_REFINEMENTS` | `dict` | Optional topic-specific addenda (stats, geometry, calculus, linear algebra) |
-| `SECONDARY_KEYWORDS` | `dict` | Conservative keyword lists used by the rule-based secondary router |
-| `ROUTER_SYSTEM` | `str` | System prompt for the lightweight LLM-based secondary classifier |
+| `TOPIC_REFINEMENTS` | `dict` | Optional addenda keyed by the 20 labels in `topic_taxonomy.CANONICAL_TOPIC_ORDER` (values may be empty) |
+| `ROUTER_SYSTEM` | `str` | System prompt for the optional lightweight LLM topic classifier (strict JSON) |
 | `ROUTER_USER_TEMPLATE` | `str` | User message template for the LLM router (formatted with `question` and `options`) |
+
+Topic labels and weighted-regex **scoring** live in repo-root `topic_taxonomy.py` (shared with `analysis/classify_topics.py`); this file only holds **prompt** text keyed by those labels.
 
 #### Routing logic
 
@@ -36,9 +37,9 @@ The router selects a primary prompt based purely on answer format:
 - 2+ `[ANS]` slots → `fr_multi` (all answers comma-separated in one `\boxed{}`)
 - otherwise → `fr_single` (single value in `\boxed{}`)
 
-Secondary refinement tags (`stats_inference`, `stats_descriptive`, `geometry`,
-`calculus`, `linear_algebra`) are optionally appended when a keyword match or a
-lightweight LLM classifier is confident.
+A single topic label is chosen via `topic_taxonomy.classify_problem` (question + option text).
+Optional `TOPIC_REFINEMENTS[topic]` text is appended when enabled. An optional tiny LLM may
+suggest a topic; invalid suggestions fall back to the same classifier.
 
 ### `distillation/`
 

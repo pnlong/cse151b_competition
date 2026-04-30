@@ -1,25 +1,24 @@
 """
 System prompts used by the prompt router.
 
-These prompts are designed to be:
-- Easy to route with a lightweight classifier (few, well-separated categories)
-- Compatible with `judger.py` extraction rules (final answer in a single \\boxed{})
-- Compatible with multi-[ANS] formatting (single \\boxed{a, b, c} at the end)
-
-The router should choose a primary prompt based on **answer format**:
-- `options` present → MCQ (letter in boxed)
-- otherwise count `[ANS]` slots:
-  - 0 or 1 slot → single-answer free response
-  - 2+ slots     → multi-answer free response (comma-separated in one boxed)
-
-Then optionally refine with a secondary "topic" prompt only when high-confidence
-keywords are present (stats inference, descriptive stats, geometry, etc.). In
-practice we keep the prompt set small and put most guardrails in the format-
-based prompts, because format mistakes are the most common source of scoring
-loss.
+Primary routing is **answer format** (MCQ vs single vs multi free-response).
+Optional **topic refinements** append short, topic-specific guardrails; labels
+match ``topic_taxonomy.CANONICAL_TOPIC_ORDER`` (same 20-way scoring as offline
+``classify_topics.py``).
 """
 
 from __future__ import annotations
+
+import json
+import sys
+from pathlib import Path
+
+# Repo root so ``topic_taxonomy`` imports when this package is loaded
+_ROOT = Path(__file__).resolve().parents[2]
+if str(_ROOT) not in sys.path:
+    sys.path.insert(0, str(_ROOT))
+
+from topic_taxonomy import CANONICAL_TOPIC_ORDER
 
 # ── Core output-format prompts (primary routing) ────────────────────────────────
 
@@ -53,116 +52,153 @@ SYSTEM_MCQ_SINGLE = (
     "- Once you have written \\boxed{...}, stop immediately. Do not revisit your choice or add any text after the boxed answer.\n"
 )
 
-# ── Optional refinements (secondary routing) ───────────────────────────────────
-# These are intended to be concatenated *after* the primary prompt when the
-# router is confident. They mainly reduce common logical slips in certain topics.
+# ── Optional topic refinements (one label per problem from topic_taxonomy) ─────
 
-REFINE_STATS_INFERENCE = (
-    "\nExtra rules for hypothesis tests / inference:\n"
-    "- Identify H0 and H1 and whether the test is left-, right-, or two-tailed.\n"
-    "- Use the tail that matches H1 for critical value and p-value.\n"
-    "- Final conclusion MUST match the comparison (reject vs fail to reject H0).\n"
-)
+_TOPIC_REFINE_BODY: dict[str, str] = {
+    "Arithmetic": (
+        "\nExtra rules for arithmetic / numeric reasoning:\n"
+        "- Track units and signs; reduce fractions and simplify radicals when asked.\n"
+        "- For ratios, percentages, and remainders, restate the interpretation before computing.\n"
+    ),
+    "Algebra": (
+        "\nExtra rules for algebra and functions:\n"
+        "- State domains where relevant; watch extraneous solutions after squaring or clearing denominators.\n"
+        "- For systems, check consistency; for quadratics, consider discriminant and factoring first.\n"
+    ),
+    "Trigonometry": (
+        "\nExtra rules for trigonometry:\n"
+        "- Prefer exact values (sin, cos, tan of standard angles) when possible; mind radians vs degrees if specified.\n"
+        "- Use identities to simplify before inverting trig functions; check quadrant for inverse-trig answers.\n"
+    ),
+    "Geometry": (
+        "\nExtra rules for geometry:\n"
+        "- Sketch relationships mentally; mark known lengths/angles.\n"
+        "- Use exact forms (radicals, \\pi) when natural; sanity-check units and scale.\n"
+    ),
+    "Number Theory": (
+        "\nExtra rules for number theory:\n"
+        "- State divisibility, gcd/lcm, and modular steps clearly; keep congruences consistent modulo m.\n"
+        "- For counting primes or factors, avoid off-by-one errors.\n"
+    ),
+    "Combinatorics": (
+        "\nExtra rules for combinatorics:\n"
+        "- Decide whether order matters and whether replacement is allowed before using nCr/nPr.\n"
+        "- For inclusion–exclusion or casework, ensure cases are disjoint or adjust overlaps.\n"
+    ),
+    "Probability": (
+        "\nExtra rules for probability:\n"
+        "- Identify sample space and whether events are independent; match conditional vs joint probability.\n"
+        "- For expectation/variance, use linearity where applicable and check boundaries.\n"
+    ),
+    "Statistics — Descriptive": (
+        "\nExtra rules for descriptive statistics (quartiles/IQR/boxplot/regression summaries):\n"
+        "- Use the standard classroom 'median-of-halves (Tukey)' convention unless the problem states otherwise.\n"
+        "- Keep track of ordering and whether the median is included in halves when n is odd.\n"
+    ),
+    "Statistics — Inference": (
+        "\nExtra rules for hypothesis tests / inference:\n"
+        "- Identify H0 and H1 and whether the test is left-, right-, or two-tailed.\n"
+        "- Use the tail that matches H1 for critical value and p-value; conclusion must match reject vs fail to reject H0.\n"
+    ),
+    "Sequences & Recurrences": (
+        "\nExtra rules for sequences and recurrences:\n"
+        "- Index shifts (n vs n+1); verify the first few terms against the recurrence.\n"
+        "- For closed forms, substitute back into the recurrence when feasible.\n"
+    ),
+    "Series & Convergence": (
+        "\nExtra rules for series:\n"
+        "- Name the test you use (geometric, ratio, root, comparison, alternating) and check hypotheses.\n"
+        "- For power series, state interval/radius carefully, including endpoint checks when required.\n"
+    ),
+    "Differential Calculus": (
+        "\nExtra rules for differential calculus:\n"
+        "- Mind domain, chain/product/quotient rules, and implicit differentiation constraints.\n"
+        "- For optimization, justify extrema with derivative tests or closed-interval endpoints.\n"
+    ),
+    "Integral Calculus": (
+        "\nExtra rules for integral calculus:\n"
+        "- Watch limits of integration, odd/even symmetry, and substitution Jacobian where relevant.\n"
+        "- For improper integrals, split at singularities and take limits separately.\n"
+    ),
+    "Differential Equations": (
+        "\nExtra rules for differential equations:\n"
+        "- Identify order, linearity, and method (separable, integrating factor, etc.); use initial/boundary data to fix constants.\n"
+        "- Substitute the solution back when quick verification is possible.\n"
+    ),
+    "Linear Algebra": (
+        "\nExtra rules for linear algebra:\n"
+        "- For determinants/eigenvalues, use row/column operations or invariants; row-rank vs column-rank for consistency.\n"
+        "- Check dimensions when multiplying matrices or interpreting span/basis.\n"
+    ),
+    "Complex Analysis": (
+        "\nExtra rules for complex numbers:\n"
+        "- Use Re/Im, modulus, and argument consistently; mind branch cuts if stated.\n"
+        "- For roots of unity or conjugates, exploit symmetry before expanding.\n"
+    ),
+    "Real Analysis": (
+        "\nExtra rules for analysis-style problems:\n"
+        "- State epsilons/deltas or bounds explicitly; monotone and bounded arguments when applicable.\n"
+        "- For sup/inf, relate to least upper bound property and avoid confusing strict vs non-strict inequalities.\n"
+    ),
+    "Discrete Mathematics": (
+        "\nExtra rules for discrete math (graphs, algorithms, logic):\n"
+        "- For graphs, track vertices vs edges and whether the graph is directed; induction bases cover smallest cases.\n"
+        "- For counting on structures, avoid double counting.\n"
+    ),
+    "Applied Mathematics": (
+        "\nExtra rules for applied / modeling problems:\n"
+        "- Translate words to equations carefully; note units and proportionality constants.\n"
+        "- Sanity-check magnitudes (growth/decay, finance, mixture) against the scenario.\n"
+    ),
+    "Abstract Algebra": (
+        "\nExtra rules for abstract algebra:\n"
+        "- State the structure (group/ring/field) and axioms you use; homomorphism kernels/images precisely.\n"
+        "- For cosets/quotients, keep representatives consistent.\n"
+    ),
+}
 
-REFINE_STATS_DESCRIPTIVE = (
-    "\nExtra rules for descriptive statistics (quartiles/IQR/boxplot):\n"
-    "- Use the standard classroom 'median-of-halves (Tukey)' convention unless the problem states otherwise.\n"
-    "- Keep track of ordering and whether the median is included in halves when n is odd.\n"
-)
+TOPIC_REFINEMENTS: dict[str, str] = {
+    topic: _TOPIC_REFINE_BODY.get(topic, "") for topic in CANONICAL_TOPIC_ORDER
+}
 
-REFINE_GEOMETRY = (
-    "\nExtra rules for geometry:\n"
-    "- Draw a quick mental diagram; mark known lengths/angles.\n"
-    "- Use exact forms (radicals, \\pi) when they arise naturally.\n"
-    "- Sanity-check with units/dimensions and approximate magnitude.\n"
-)
-
-REFINE_CALCULUS = (
-    "\nExtra rules for calculus/algebra:\n"
-    "- Be careful with signs, constants, and domain restrictions.\n"
-    "- For integrals/derivatives, use standard identities and verify by differentiation/substitution.\n"
-)
-
-REFINE_LINEAR_ALGEBRA = (
-    "\nExtra rules for linear algebra:\n"
-    "- For determinants/eigenvalues, use row/column operations or known identities and verify with small cases.\n"
-)
+if set(TOPIC_REFINEMENTS) != set(CANONICAL_TOPIC_ORDER):
+    raise RuntimeError("TOPIC_REFINEMENTS keys must match CANONICAL_TOPIC_ORDER")
 
 # ── Router-facing structures ───────────────────────────────────────────────────
 
 PRIMARY_PROMPTS = {
-    # Free response: 0 or 1 [ANS] slot (or open-ended single value)
     "fr_single": SYSTEM_FR_SINGLE,
-    # Free response: 2+ [ANS] slots
     "fr_multi": SYSTEM_FR_MULTI,
-    # Multiple choice: options present
     "mcq_single": SYSTEM_MCQ_SINGLE,
 }
 
-SECONDARY_REFINEMENTS = {
-    # Secondary tags the lightweight router can optionally attach
-    "stats_inference": REFINE_STATS_INFERENCE,
-    "stats_descriptive": REFINE_STATS_DESCRIPTIVE,
-    "geometry": REFINE_GEOMETRY,
-    "calculus": REFINE_CALCULUS,
-    "linear_algebra": REFINE_LINEAR_ALGEBRA,
-}
-
-# A minimal, feasible keyword router can use these as high-precision triggers.
-# Keep patterns simple and conservative (prefer false negatives over false positives).
-SECONDARY_KEYWORDS = {
-    "stats_inference": [
-        "hypothesis", "p-value", "critical z", "critical value", "significance", "alpha=",
-        "reject the null", "fail to reject", "z-score", "t-score", "confidence interval",
-    ],
-    "stats_descriptive": [
-        "quartile", "IQR", "interquartile", "box plot", "boxplot", "median", "Q1", "Q3",
-    ],
-    "geometry": [
-        "triangle", "circle", "radius", "diameter", "angle", "perimeter", "area", "volume",
-        "parallel", "perpendicular", "similar", "congruent",
-    ],
-    "calculus": [
-        "\\int", "integral", "derivative", "differentiate", "limit", "series", "taylor",
-        "differential equation", "ODE",
-    ],
-    "linear_algebra": [
-        "matrix", "determinant", "eigenvalue", "eigenvector", "rank",
-    ],
-}
-
-# ── Lightweight router model prompts ────────────────────────────────────────────
-#
-# The lightweight router should output a compact JSON object that downstream code
-# can parse deterministically. Keep the label set small and aligned with keys
-# in PRIMARY_PROMPTS / SECONDARY_REFINEMENTS.
+_TOPIC_CHOICES_JSON = json.dumps(list(CANONICAL_TOPIC_ORDER), ensure_ascii=False)
 
 ROUTER_SYSTEM = (
-    "You are a routing classifier for math questions.\n"
-    "Your job: choose the best system-prompt route using ONLY the provided fields:\n"
-    "- question: string\n"
-    "- options: either null or a list of answer-choice strings\n\n"
+    "You are a routing assistant for math competition problems.\n"
+    "Your job: output JSON describing the answer format and (optionally) the curriculum topic.\n"
+    "Use ONLY the provided fields: question (string), options (null or list of strings).\n\n"
     "You MUST output ONLY valid JSON (no markdown, no commentary).\n\n"
     "### Primary route (required)\n"
     "Choose exactly ONE of:\n"
-    '- "mcq_single": options is a non-empty list (multiple choice; answer should be a letter)\n'
+    '- "mcq_single": options is a non-empty list\n'
     '- "fr_multi": options is null/empty AND question contains 2+ occurrences of "[ANS]"\n'
-    '- "fr_single": otherwise (options is null/empty and 0 or 1 "[ANS]")\n\n'
-    "### Secondary tags (optional)\n"
-    "Add zero or more tags from this list ONLY if you are confident:\n"
-    '["stats_inference","stats_descriptive","geometry","calculus","linear_algebra"]\n'
-    "If unsure, output an empty list.\n\n"
+    '- "fr_single": otherwise\n\n'
+    "### Topic (optional)\n"
+    'Set "topic" to exactly ONE string from the following JSON array, or "" if unsure:\n'
+    f"{_TOPIC_CHOICES_JSON}\n"
+    "The string must match an element exactly (including punctuation and dashes).\n\n"
     "### Output schema\n"
-    '{\n'
+    "{\n"
     '  "primary": <string>,\n'
-    '  "secondary": <list of strings>,\n'
+    '  "topic": <string>,\n'
     '  "n_ans": <integer count of "[ANS]" in question>,\n'
     '  "has_options": <true|false>\n'
-    '}\n\n'
+    "}\n\n"
     "Hard rules:\n"
     "- Count [ANS] literally.\n"
     "- If options is present and non-empty, primary MUST be mcq_single.\n"
-    "- Do not invent new labels.\n"
+    '- If unsure about topic, set "topic" to "".\n'
 )
 
 ROUTER_USER_TEMPLATE = (
@@ -171,5 +207,3 @@ ROUTER_USER_TEMPLATE = (
     "options:\n"
     "{options}\n"
 )
-
-
