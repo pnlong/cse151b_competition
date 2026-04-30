@@ -109,26 +109,12 @@ python inference/evaluate.py \
     --notes "prompt routing (keyword secondary), self-consistency N=4, thinking on"
 ```
 
-To test the LLM-based secondary router instead of keyword matching (uses `Qwen2.5-0.5B-Instruct` on CPU):
-```bash
-CUDA_VISIBLE_DEVICES=0 python inference/infer.py --gpu --quantize \
-    --data data/public.jsonl \
-    --n-samples 4 \
-    --use-router --router-secondary-llm \
-    --output /deepfreeze/pnlong/school/cse151b/final/results/public_router_llm_n4.csv
-
-python inference/evaluate.py \
-    --results /deepfreeze/pnlong/school/cse151b/final/results/public_router_llm_n4.csv \
-    --model "Qwen3-4B" --checkpoint base --n-samples 4 \
-    --notes "prompt routing (LLM secondary), self-consistency N=4, thinking on"
-```
-
 To test routing in isolation without loading the main model:
 ```bash
 python inference/test_router.py
 ```
 
-**What to report**: MCQ accuracy, free-form accuracy, overall accuracy. Compare to 1c to measure the routing gain. Compare keyword vs LLM secondary if both are run.
+**What to report**: MCQ accuracy, free-form accuracy, overall accuracy. Compare to 1c to measure the routing gain.
 
 ---
 

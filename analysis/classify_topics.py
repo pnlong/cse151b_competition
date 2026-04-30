@@ -1,0 +1,632 @@
+#!/usr/bin/env python3
+"""
+Topic classifier for the public and private math problem datasets.
+
+Classifies each problem into one of 20 mathematical topic categories using
+weighted keyword scoring, then writes a CSV to data/topic_classifications.csv.
+
+Output CSV columns:
+    set      — "public" or "private"
+    id       — problem id from the JSONL
+    topic    — one of the 20 topic labels below
+
+Topics
+------
+ 1  Arithmetic
+ 2  Algebra
+ 3  Trigonometry
+ 4  Geometry
+ 5  Number Theory
+ 6  Combinatorics
+ 7  Probability
+ 8  Statistics — Descriptive
+ 9  Statistics — Inference
+10  Sequences & Recurrences
+11  Series & Convergence
+12  Differential Calculus
+13  Integral Calculus
+14  Differential Equations
+15  Linear Algebra
+16  Complex Analysis
+17  Real Analysis
+18  Discrete Mathematics
+19  Applied Mathematics
+20  Abstract Algebra
+
+Usage (from the repo root):
+    python analysis/classify_topics.py
+    python analysis/classify_topics.py --output data/my_classifications.csv
+"""
+
+from __future__ import annotations
+
+import argparse
+import csv
+import json
+import re
+import sys
+from pathlib import Path
+
+REPO_ROOT = Path(__file__).resolve().parent.parent
+sys.path.insert(0, str(REPO_ROOT))
+
+from config import PUBLIC_DATA, PRIVATE_DATA
+
+DEFAULT_OUTPUT = REPO_ROOT / "data" / "topic_classifications.csv"
+
+# ── Topic keyword definitions ─────────────────────────────────────────────────
+#
+# Each entry is (regex_pattern, weight).
+# Patterns are matched case-insensitively against the full question text.
+# Weight 3 = highly specific signal; 2 = moderate; 1 = weak / tiebreaker.
+#
+# Both LaTeX-escaped forms (e.g. r'\\int') and bare forms (e.g. r'\bint_')
+# are included because the dataset has inconsistent backslash encoding.
+
+TOPICS: dict[str, list[tuple[str, int]]] = {
+
+    "Arithmetic": [
+        (r'\bfraction\b', 2),
+        (r'\bdecimal\b', 2),
+        (r'\bpercent(age)?\b', 2),
+        (r'\bratio\b', 1),
+        (r'\bquotient\b', 2),
+        (r'\bremainder\b', 2),
+        (r'\bwhole\s+number\b', 2),
+        (r'\bdigit\b', 1),
+        (r'\bunit\s+conversion\b', 3),
+        (r'\bcelsius\b', 2),
+        (r'\bfahrenheit\b', 2),
+        (r'\bkelvin\b', 2),
+        (r'\bpound(s)?\b', 1),
+        (r'\border\s+of\s+operations\b', 3),
+        (r'\breduce\s+the\s+frac', 3),
+        (r'\bsimplif(y|ied|ication)\b', 1),
+        (r'\bdivid(e|ing)\b', 1),
+        (r'\bmultipl(y|ication)\b', 1),
+        (r'\bsubtract\b', 1),
+        (r'\baddition\b', 1),
+        (r'\barithmetic\b', 1),
+    ],
+
+    "Algebra": [
+        (r'\bsolve\s+for\b', 2),
+        (r'\bpolynomial\b', 2),
+        (r'\bquadratic\b', 2),
+        (r'\blinear\s+(equation|function|model)\b', 2),
+        (r'\bslope\b', 2),
+        (r'\bintercept\b', 2),
+        (r'\binequalit(y|ies)\b', 2),
+        (r'\bexponent(ial)?\b', 2),
+        (r'\blogarithm\b', 2),
+        (r'(\\|)log\b', 2),
+        (r'(\\|)ln\b', 2),
+        (r'\bfactor(ization|ise|ize)?\b', 1),
+        (r'\bsystem\s+of\s+equations\b', 3),
+        (r'\bdomain\b', 2),
+        (r'\brange\b', 1),
+        (r'\bcoefficient\b', 2),
+        (r'\bpiecewise\b', 2),
+        (r'\bcomposit(e\s+function|ion\s+of)\b', 2),
+        (r'\binverse\s+function\b', 2),
+        (r'\broot(s)?\s+of\b', 2),
+        (r'\bparabola\b', 2),
+        (r'\bvertex\s+of\b', 2),
+        (r'\basymptote\b', 2),
+        (r'\bexpand\b', 1),
+        (r'\brational\s+(function|expression)\b', 2),
+        (r'\bpartial\s+fractions?\b', 3),
+    ],
+
+    "Trigonometry": [
+        (r'(\\|)sin\b', 3),
+        (r'(\\|)cos\b', 3),
+        (r'(\\|)tan\b', 3),
+        (r'(\\|)sec\b', 2),
+        (r'(\\|)csc\b', 2),
+        (r'(\\|)cot\b', 2),
+        (r'\btrigonometr(y|ic)\b', 3),
+        (r'\bradian\b', 2),
+        (r'\bunit\s+circle\b', 3),
+        (r'\bsinusoidal\b', 3),
+        (r'(\\|)arcsin\b', 3),
+        (r'(\\|)arccos\b', 3),
+        (r'(\\|)arctan\b', 3),
+        (r'\btrig(onometric)?\s+identit', 3),
+        (r'\bamplitude\b', 2),
+        (r'\bphase\s+shift\b', 2),
+        (r'\bpolar\s+(equation|form|coordinate)', 2),
+        (r'(\\|)theta\b', 2),
+        (r'\bangle[s]?\s+of\s+(elevation|depression)', 3),
+        (r'\blaw\s+of\s+(sines|cosines)\b', 3),
+    ],
+
+    "Geometry": [
+        (r'\btriangle\b', 2),
+        (r'\bcircle\b', 2),
+        (r'\brectangle\b', 2),
+        (r'\bpolygon\b', 2),
+        (r'\bperimeter\b', 3),
+        (r'\barea\b', 1),
+        (r'\bvolume\b', 2),
+        (r'\bradius\b', 2),
+        (r'\bdiameter\b', 2),
+        (r'\bcircumference\b', 3),
+        (r'\bangle[s]?\b', 1),
+        (r'\bparallel\b', 2),
+        (r'\bperpendicular\b', 2),
+        (r'\bsimilar\s+(triangle|polygon|figure)', 2),
+        (r'\bcongruent\b', 2),
+        (r'\bpythagorean\b', 3),
+        (r'\bhypotenuse\b', 3),
+        (r'\bcircumscribed\b', 2),
+        (r'\binscribed\b', 2),
+        (r'\bsphere\b', 2),
+        (r'\bcylinder\b', 2),
+        (r'\bcone\b', 2),
+        (r'\bmidpoint\b', 2),
+        (r'\bchord\b', 2),
+        (r'\btangent\s+(line\s+to|to\s+the\s+circle)', 2),
+        (r'\bcircumcircle\b', 2),
+        (r'\bincircle\b', 2),
+        (r'\baltitude\s+(from|of)', 2),
+    ],
+
+    "Number Theory": [
+        (r'\bprime\b', 2),
+        (r'\bcomposite\s+number\b', 2),
+        (r'\bcoprime\b', 2),
+        (r'(\\|)gcd\b', 3),
+        (r'\bgreatest\s+common\s+(divisor|factor)\b', 3),
+        (r'(\\|)lcm\b', 3),
+        (r'\bleast\s+common\s+multiple\b', 3),
+        (r'\bmodular\b', 3),
+        (r'\bmod\b', 2),
+        (r'\bcongruent\s+(to\s+)?\d', 3),
+        (r'\bdivisib(le|ility)\b', 2),
+        (r'\bfactorization\b', 2),
+        (r'\beuler.s?\s+(totient|phi)\b', 3),
+        (r'\bnumber\s+theory\b', 3),
+        (r'\bbase[\s-]\d', 2),
+        (r'\bpalindrome\b', 3),
+        (r'\bperfect\s+number\b', 3),
+        (r'\bperfect\s+square\b', 2),
+        (r'\bdigit\s+sum\b', 2),
+        (r'\bdiophantine\b', 3),
+        (r'\bprimality\b', 3),
+        (r'\bsieve\b', 3),
+        (r'\bsmallest\s+(prime|divisor|factor)\b', 2),
+    ],
+
+    "Combinatorics": [
+        (r'\bcombination[s]?\b', 3),
+        (r'\bpermutation[s]?\b', 3),
+        (r'(\\|)binom\b', 3),
+        (r'\bcounting\b', 2),
+        (r'\bnumber\s+of\s+ways\b', 3),
+        (r'\bhow\s+many\s+(ways|choices|arrangements|strings|sequences)\b', 3),
+        (r'\bpigeonhole\b', 3),
+        (r'\binclusion.exclusion\b', 3),
+        (r'\bgenerating\s+function\b', 3),
+        (r'\bcatalan\b', 3),
+        (r'\bpartition[s]?\s+of\b', 2),
+        (r'\bnecklace\b', 3),
+        (r'\bderangement\b', 3),
+        (r'\bselect\b', 1),
+        (r'\barrangement[s]?\b', 2),
+        (r'\bmultiset\b', 3),
+        (r'\bstirling\b', 3),
+        (r'\bbinomial\s+coefficient\b', 3),
+    ],
+
+    "Probability": [
+        (r'\bprobabilit(y|ies)\b', 3),
+        (r'\bchance\b', 2),
+        (r'\bsample\s+space\b', 3),
+        (r'\brandom\s+variable\b', 3),
+        (r'\bindependent\s+event\b', 3),
+        (r'\bconditional\s+probability\b', 3),
+        (r'\bbayes\b', 3),
+        (r'\bbernoulli\b', 3),
+        (r'\bbinomial\s+distribution\b', 3),
+        (r'\bpoisson\s+(distribution|process)\b', 3),
+        (r'\bexpected\s+value\b', 3),
+        (r'\bnormal\s+distribution\b', 3),
+        (r'\bstandard\s+normal\b', 3),
+        (r'\buniform\s+distribution\b', 3),
+        (r'\bexponential\s+distribution\b', 3),
+        (r'\bP\s*\(\s*[A-Z]\b', 2),
+        (r'\bdraw(n|ing)?\s+(from|without|with)\b', 2),
+        (r'\bwithout\s+replacement\b', 3),
+        (r'\bfair\s+(die|coin|card)\b', 2),
+        (r'\bpdf\b', 2),
+        (r'\bcdf\b', 2),
+        (r'\bmoment\s+generating\b', 3),
+        (r'\bgeometric\s+distribution\b', 3),
+    ],
+
+    "Statistics — Descriptive": [
+        (r'\bstandard\s+deviation\b', 3),
+        (r'\bvariance\b', 2),
+        (r'\bmedian\b', 2),
+        (r'\bquartile\b', 3),
+        (r'\bIQR\b', 3),
+        (r'\binterquartile\b', 3),
+        (r'\bboxplot\b', 3),
+        (r'\bregression\b', 3),
+        (r'\bcorrelation\s+(coefficient|between)\b', 3),
+        (r'\bscatter\s+(plot|diagram)\b', 2),
+        (r'\boutlier\b', 2),
+        (r'\bhistogram\b', 2),
+        (r'\bz.score\b', 2),
+        (r'\bpercentile\b', 2),
+        (r'\bbivariate\b', 3),
+        (r'\bresidual\b', 2),
+        (r'\bleast.squares\b', 3),
+        (r'\bsample\s+mean\b', 2),
+        (r'\bsample\s+(size|of\s+\d)', 1),
+        (r'\bsummar(y|ize)\s+(statistics|data)\b', 2),
+        (r'\bskew(ness|ed)?\b', 2),
+        (r'\b5.number\s+summary\b', 3),
+    ],
+
+    "Statistics — Inference": [
+        (r'\bhypothes(is|es)\s+test\b', 3),
+        (r'\bnull\s+hypothesis\b', 3),
+        (r'\balternative\s+hypothesis\b', 3),
+        (r'\bp.value\b', 3),
+        (r'\bconfidence\s+interval\b', 3),
+        (r'\bsignificance\s+(level|test)\b', 3),
+        (r'\breject\s+the\s+null\b', 3),
+        (r'\bfail\s+to\s+reject\b', 3),
+        (r'\bt.test\b', 3),
+        (r'\bchi.squ(are|ared)\b', 3),
+        (r'\bcritical\s+(value|region)\b', 3),
+        (r'\btype\s+(I|II|1|2)\s+error\b', 3),
+        (r'\balpha\s*=\s*0\.\d', 3),
+        (r'\blevel\s+of\s+significance\b', 3),
+        (r'\bANOVA\b', 3),
+        (r'\bF.test\b', 3),
+        (r'\btest\s+statistic\b', 3),
+        (r'\bmargin\s+of\s+error\b', 3),
+        (r'\bsampling\s+distribution\b', 3),
+        (r'\bcentral\s+limit\s+theorem\b', 3),
+    ],
+
+    "Sequences & Recurrences": [
+        (r'\bsequence\b', 2),
+        (r'\brecurren(ce|t)\s+(relation|formula|equation)\b', 3),
+        (r'\barithmetic\s+sequence\b', 3),
+        (r'\bgeometric\s+sequence\b', 3),
+        (r'\bcommon\s+(difference|ratio)\b', 3),
+        (r'\ba_\{?n\}?\b', 2),
+        (r'\ba_n\b', 2),
+        (r'\bfibonacci\b', 3),
+        (r'\btelescoping\b', 3),
+        (r'\bharmonic\s+(mean|series)\b', 2),
+        (r'\barithmetic\s+means?\b', 2),
+        (r'\binsert\s+\d+\s+(arithmetic|geometric)\s+mean', 3),
+        (r'\bn.th\s+term\b', 2),
+        (r'\bgeneral\s+term\b', 2),
+        (r'\bj_\{?[0-9]\b', 2),
+        (r'\bc_\{?\d\b', 1),
+    ],
+
+    "Series & Convergence": [
+        (r'(\\|)sum_', 3),
+        (r'\bpower\s+series\b', 3),
+        (r'\btaylor\s+series\b', 3),
+        (r'\bmaclaurin\b', 3),
+        (r'\bradius\s+of\s+convergence\b', 3),
+        (r'\blaurent\s+series\b', 3),
+        (r'\bconverg(es?|ence|ent)\b', 2),
+        (r'\bdiverge(s|nce|nt)?\b', 2),
+        (r'\binfinite\s+series\b', 3),
+        (r'\bpartial\s+sum\b', 2),
+        (r'(\\|)sum\b', 2),
+        (r'\bfourier\s+(series|transform)\b', 3),
+        (r'\bgeometric\s+series\b', 3),
+        (r'\bintegral\s+test\b', 3),
+        (r'\bcomparison\s+test\b', 2),
+        (r'\bratio\s+test\b', 3),
+        (r'\broot\s+test\b', 3),
+        (r'\balternat(ing|e)\s+series\b', 3),
+        (r'\babsolutely?\s+converg', 3),
+        (r'\binterval\s+of\s+convergence\b', 3),
+        (r'\bpower\s+series\s+expansion\b', 3),
+    ],
+
+    "Differential Calculus": [
+        (r'\bderivative\b', 3),
+        (r'\bdifferentiat(e|ion)\b', 3),
+        (r'\bchain\s+rule\b', 3),
+        (r'\bproduct\s+rule\b', 3),
+        (r'\bquotient\s+rule\b', 3),
+        (r'\bimplicit\s+differentiation\b', 3),
+        (r'\brelated\s+rates\b', 3),
+        (r'\boptimiz(e|ation)\b', 2),
+        (r'\bcritical\s+point\b', 3),
+        (r'\btangent\s+line\b', 3),
+        (r'\bnormal\s+line\b', 2),
+        (r'\bconcav(e|ity)\b', 3),
+        (r'\binflection\s+point\b', 3),
+        (r'\bfirst\s+derivative\s+test\b', 3),
+        (r'\bsecond\s+derivative\b', 3),
+        (r'\bpartial\s+derivative\b', 3),
+        (r'(\\|)partial\b', 2),
+        (r'\brate\s+of\s+change\b', 2),
+        (r'\bgradient\b', 2),
+        (r'frac\{d', 3),
+        (r"f\s*'\s*\(", 2),
+        (r"y\s*'\b", 2),
+        (r'\bL.Hopital\b', 3),
+        (r'\bMean\s+Value\s+Theorem\b', 3),
+    ],
+
+    "Integral Calculus": [
+        (r'(\\|)int\b', 3),
+        (r'(\\|)iint\b', 3),
+        (r'(\\|)iiint\b', 3),
+        (r'\bintegrat(e|ion|ing)\b', 3),
+        (r'\bantiderivative\b', 3),
+        (r'\bdefinite\s+integral\b', 3),
+        (r'\bindefinite\s+integral\b', 3),
+        (r'\bvolume\s+of\s+revolution\b', 3),
+        (r'\bdouble\s+integral\b', 3),
+        (r'\btriple\s+integral\b', 3),
+        (r'\bgreen.s\s+theorem\b', 3),
+        (r'\bstokes.?\s+theorem\b', 3),
+        (r'\bdivergence\s+theorem\b', 3),
+        (r'\bfubini\b', 3),
+        (r'\bchange\s+of\s+variables\b', 2),
+        (r'\bu.substitution\b', 3),
+        (r'\bintegration\s+by\s+parts\b', 3),
+        (r'\bimproper\s+integral\b', 3),
+        (r'\b(\\|)int_\{', 3),
+        (r'ds\s*=', 2),
+        (r'dx\s*dy\b', 2),
+    ],
+
+    "Differential Equations": [
+        (r'\bdifferential\s+equation\b', 3),
+        (r'\bODE\b', 3),
+        (r'\bPDE\b', 3),
+        (r'\binitial\s+(value|condition)\b', 3),
+        (r'\bboundary\s+(value|condition)\b', 3),
+        (r'\blaplace\s+transform\b', 3),
+        (r'\bhomogeneous\s+(equation|ODE|solution)\b', 2),
+        (r'\bparticular\s+solution\b', 3),
+        (r'\bgeneral\s+solution\b', 2),
+        (r'\bseparable\b', 3),
+        (r'\bintegrating\s+factor\b', 3),
+        (r'dy\s*/\s*dx\b', 3),
+        (r'frac\{dy\}\{dx\}', 3),
+        (r'\bNewton.s\s+(law\s+of\s+cooling|cooling)\b', 3),
+        (r'\bexponential\s+(growth|decay)\s+model\b', 2),
+        (r'\bhalf.life\b', 2),
+        (r'\bdecay\s+constant\b', 2),
+        (r'\bcharacteristic\s+equation\b', 3),
+        (r'\bWronskian\b', 3),
+        (r'\bsteady.state\b', 2),
+        (r'\bNewton.s\s+second\s+law\b', 2),
+    ],
+
+    "Linear Algebra": [
+        (r'\bmatri(x|ces)\b', 3),
+        (r'\bdeterminant\b', 3),
+        (r'\beigenvalue\b', 3),
+        (r'\beigenvector\b', 3),
+        (r'\brank\s+of\b', 3),
+        (r'\bspan\b', 2),
+        (r'\bbasis\b', 2),
+        (r'\blinear\s+(transformation|map|independence|dependence)\b', 3),
+        (r'\bvector\s+space\b', 3),
+        (r'\bnull\s+(space|ity)\b', 3),
+        (r'\brow\s+reduction\b', 3),
+        (r'\bGauss(ian)?\s+elimination\b', 3),
+        (r'\bdot\s+product\b', 2),
+        (r'\bcross\s+product\b', 2),
+        (r'\borthogon(al|ality)\b', 2),
+        (r'\blinear\s+combination\b', 3),
+        (r'\b(\\|)mathbb\{R\}\^\{?\d', 2),
+        (r'\bcolumn\s+(space|vector)\b', 2),
+        (r'\binvertib(le|ility)\b', 2),
+        (r'\bsymmetric\s+matrix\b', 2),
+        (r'\bdiagonal(ize|ization)\b', 3),
+    ],
+
+    "Complex Analysis": [
+        (r'\bcomplex\s+(number|function|variable|plane|analysis)\b', 3),
+        (r'\bimaginary\s+(part|unit|number)\b', 3),
+        (r'\banalytic\s+function\b', 3),
+        (r'\bholomorphic\b', 3),
+        (r'\bcontour\s+(integral|integration)\b', 3),
+        (r'\bresidue\b', 3),
+        (r'\bCauchy\b', 3),
+        (r'\blaurent\s+(series|expansion)\b', 3),
+        (r'\bconformal\b', 3),
+        (r'\bMobius\b', 3),
+        (r'\\mathrm\{i\}\b', 2),
+        (r'\bIm\s*\(', 2),
+        (r'\bRe\s*\(', 2),
+        (r'\b\|z\|', 2),
+        (r'\\bar\{z\}', 2),
+        (r'\bRiemann\s+(surface|sphere|zeta)\b', 3),
+        (r'\bcomplex\s+zero[s]?\b', 2),
+        (r'\banalytic\s+continuation\b', 3),
+        (r'\bargument\s+(of|the)\s+(complex|function)', 2),
+        (r'\bimaginary\s+axis\b', 2),
+    ],
+
+    "Real Analysis": [
+        (r'\bepsilon.delta\b', 3),
+        (r'\buniform\s+convergence\b', 3),
+        (r'\bmetric\s+space\b', 3),
+        (r'\bcompact(ness)?\b', 2),
+        (r'\bopen\s+(set|ball)\b', 2),
+        (r'\bclosed\s+(set|ball)\b', 2),
+        (r'\binfimum\b', 3),
+        (r'\bsupremum\b', 3),
+        (r'\bleast\s+upper\s+bound\b', 3),
+        (r'\bgreatest\s+lower\s+bound\b', 3),
+        (r'\bbounded\s+(above|below|sequence|function)\b', 2),
+        (r'\bChebyshev\b', 3),
+        (r'\bBernstein\s+polynomial\b', 3),
+        (r'\bnumerical\s+(method|approximation)\b', 3),
+        (r'\bdichotomy\b', 2),
+        (r'\bbisection\b', 2),
+        (r'\bNewton.s\s+method\b', 3),
+        (r'\bbest\s+(uniform|approximation)\b', 3),
+        (r'\bLipschitz\b', 3),
+        (r'\bCauchy\s+sequence\b', 3),
+        (r'\bHeine.Borel\b', 3),
+        (r'\bminimax\b', 2),
+        (r'\blower\s+bound\b', 2),
+        (r'\bupper\s+bound\b', 2),
+    ],
+
+    "Discrete Mathematics": [
+        (r'\bwe\s+now\s+define\s+an\s+algorithm\b', 3),
+        (r'\bOEIS\b', 3),
+        (r'\bMatula.Goebel\b', 3),
+        (r'\bDoudna\b', 3),
+        (r'\breversion\s+transform\b', 3),
+        (r'\bgraph\s+(theory|coloring|isomorphism)\b', 3),
+        (r'\btree\b', 2),
+        (r'\bnode[s]?\b', 2),
+        (r'\bedge[s]?\b', 2),
+        (r'\bvertex\s+(of\s+(the|a)\s+graph|set)\b', 2),
+        (r'\balgorithm\b', 2),
+        (r'\bbinary\s+(representation|string|tree|search)\b', 2),
+        (r'\bBoolean\b', 2),
+        (r'\bautomaton\b', 2),
+        (r'\bfinite\s+(state|automaton)\b', 3),
+        (r'\bbase[-\s]\d\b', 1),
+        (r'\bsemiperimeter\b', 3),
+        (r'\bbalanced\s+prime\b', 3),
+        (r'\bnumber\s+of\s+internal\s+nodes\b', 3),
+    ],
+
+    "Applied Mathematics": [
+        (r'\bcompound\s+interest\b', 3),
+        (r'\bpresent\s+value\b', 3),
+        (r'\bdepreciat(e|ion)\b', 3),
+        (r'\bhalf.life\b', 2),
+        (r'\bradioactive\b', 3),
+        (r'\bpopulation\s+(model|growth|density|of\s+deer)\b', 3),
+        (r'\bexponential\s+(growth|decay)\b', 2),
+        (r'\bNewton.s\s+law\s+of\s+cooling\b', 3),
+        (r'\bprofit\b', 2),
+        (r'\brevenue\b', 2),
+        (r'\bcost\s+function\b', 2),
+        (r'\bsupply\b', 2),
+        (r'\bdemand\b', 2),
+        (r'\bmixture\b', 3),
+        (r'\bdistance[\s,]+rate[\s,]+time\b', 2),
+        (r'\bspring\b', 2),
+        (r'\boscillat(e|ion)\b', 2),
+        (r'\bfluid\b', 2),
+        (r'\bwork\s+rate\b', 3),
+        (r'\bdepreciate\b', 3),
+        (r'\bcandle\b', 2),
+        (r'\bsnowdrift\b', 3),
+    ],
+
+    "Abstract Algebra": [
+        (r'\babelian\b', 3),
+        (r'\bsubgroup\b', 3),
+        (r'\bcoset\b', 3),
+        (r'\bGalois\b', 3),
+        (r'\bhomomorphism\b', 3),
+        (r'\bisomorphism\b', 3),
+        (r'\bprojective\s+(space|variety|plane)\b', 3),
+        (r'\bmanifold\b', 3),
+        (r'\bvector\s+bundle\b', 3),
+        (r'\bsymmetric\s+group\b', 3),
+        (r'\bnormal\s+subgroup\b', 3),
+        (r'\bmodule\b', 2),
+        (r'\bideal\b', 2),
+        (r'\bfield\s+(extension|theory)\b', 3),
+        (r'\bring\s+theory\b', 3),
+        (r'\bgroup\s+(theory|action|homomorphism)\b', 3),
+        (r'\bquotient\s+(group|ring|space)\b', 3),
+        (r'\balgebraic\s+(variety|structure|geometry)\b', 3),
+        (r'\bHom\s*\(', 2),
+    ],
+}
+
+# Stable iteration order for plotting / reporting (matches dict insertion order above).
+CANONICAL_TOPIC_ORDER: tuple[str, ...] = tuple(TOPICS.keys())
+
+# Fallback topic used when no keyword matches (score = 0)
+_FALLBACK = "Algebra"
+
+# ── Classification ─────────────────────────────────────────────────────────────
+
+def classify(text: str) -> str:
+    """Return the best-matching topic label for the given question text."""
+    scores: dict[str, int] = {}
+    for topic, patterns in TOPICS.items():
+        score = 0
+        for pattern, weight in patterns:
+            score += len(re.findall(pattern, text, re.IGNORECASE)) * weight
+        scores[topic] = score
+
+    best = max(scores, key=lambda t: scores[t])
+    return best if scores[best] > 0 else _FALLBACK
+
+
+# ── I/O helpers ───────────────────────────────────────────────────────────────
+
+def _load_jsonl(path: Path) -> list[dict]:
+    with open(path) as fh:
+        return [json.loads(line) for line in fh if line.strip()]
+
+
+# ── Main ──────────────────────────────────────────────────────────────────────
+
+def main() -> None:
+    parser = argparse.ArgumentParser(
+        description="Classify every problem into one of 20 topic categories.",
+    )
+    parser.add_argument(
+        "--output", type=Path, default=DEFAULT_OUTPUT,
+        metavar="PATH",
+        help=f"Output CSV path (default: {DEFAULT_OUTPUT})",
+    )
+    args = parser.parse_args()
+
+    rows: list[dict] = []
+
+    for path, split_name in [(PUBLIC_DATA, "public"), (PRIVATE_DATA, "private")]:
+        print(f"Classifying {split_name} set …")
+        items = _load_jsonl(path)
+        for item in items:
+            topic = classify(item["question"])
+            rows.append({"set": split_name, "id": item["id"], "topic": topic})
+        print(f"  Done — {len(items):,} problems classified.")
+
+    # ── Write CSV ─────────────────────────────────────────────────────────────
+    args.output.parent.mkdir(parents=True, exist_ok=True)
+    with open(args.output, "w", newline="") as fh:
+        writer = csv.DictWriter(fh, fieldnames=["set", "id", "topic"])
+        writer.writeheader()
+        writer.writerows(rows)
+
+    print(f"\nWrote {len(rows):,} rows → {args.output}")
+
+    # ── Summary ───────────────────────────────────────────────────────────────
+    from collections import Counter
+    print("\n── Topic distribution ────────────────────────────────────────────")
+    for split_name in ("public", "private"):
+        split_rows = [r for r in rows if r["set"] == split_name]
+        counts = Counter(r["topic"] for r in split_rows)
+        n = len(split_rows)
+        print(f"\n  {split_name.capitalize()} Set  (n = {n:,})")
+        for topic, cnt in sorted(counts.items(), key=lambda x: -x[1]):
+            pct = 100.0 * cnt / n
+            print(f"    {topic:<28}  {cnt:>5,}  ({pct:.1f}%)")
+
+
+if __name__ == "__main__":
+    main()

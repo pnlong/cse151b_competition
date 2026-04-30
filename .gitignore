@@ -1,11 +1,9 @@
 .claude
 .venv
 results
-data
-!data/public.jsonl
-!data/private.jsonl
 __pycache__
 LICENSE
 .env
 scratchpaper
 cache
+*.pdf
