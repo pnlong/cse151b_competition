@@ -22,13 +22,13 @@ Paths to the JSONL files come from [`config.py`](../config.py) (via `.env` → `
 - **`--source router`** (default): topic bars = inference router secondary keywords (may overlap per problem; many rows end up as “None”).
 - **`--source csv`**: topic bars = labels from `topic_classifications.csv` (exactly one topic per problem). Requires the CSV to exist — run `classify_topics.py` first.
 - **`--classifications PATH`**: CSV path when using `--source csv` (default: `data/topic_classifications.csv`).
-- **Plot**: optional `--output path.pdf` (or `.png`). Without `--output`, opens an interactive matplotlib window.
+- **`--plot-top N`**: figure only — show the **`N` topics with the largest counts on the private split** (ties broken alphabetically). `0` = show every topic that appears in either split. Stdout tables still list all topics; omitted topics are summarized after the tables when `N > 0`.
 - **Format breakdown** is always computed from the JSONL (`primary_route`), independent of `--source`.
 
 ```bash
 python analysis/dataset_breakdown.py
 python analysis/dataset_breakdown.py --source router --output analysis/breakdown_router.pdf
-python analysis/dataset_breakdown.py --source csv --output analysis/breakdown_topics.pdf
+python analysis/dataset_breakdown.py --source csv --plot-top 10 --output analysis/breakdown_topics.pdf
 python analysis/dataset_breakdown.py --source csv --classifications data/topic_classifications.csv
 ```
 

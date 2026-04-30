@@ -16,7 +16,7 @@ from each problem’s JSON fields via `primary_route` (same primary routing as i
 Usage (from the repo root):
     python analysis/dataset_breakdown.py
     python analysis/dataset_breakdown.py --source router --output analysis/breakdown_router.pdf
-    python analysis/dataset_breakdown.py --source csv --output analysis/breakdown_topics.pdf
+    python analysis/dataset_breakdown.py --source csv --plot-top 10 --output analysis/breakdown_topics.pdf
 """
 
 from __future__ import annotations
@@ -184,6 +184,32 @@ def _print_topic_table(
         print(f"    {topic:<30}  {cnt:>5,}  ({pct:.1f}%)")
 
 
+def _select_plot_topics(
+    active: list[str],
+    private: AnalysisResult,
+    plot_top: int,
+) -> tuple[list[str], list[str]]:
+    """
+    Choose which topics appear in the figure.
+
+    When ``plot_top`` > 0, keep only the ``plot_top`` topics with the largest
+    private-set counts (ties broken by topic name). Otherwise keep all ``active``.
+
+    Returns ``(display_order, excluded)`` where ``display_order`` is sorted for
+    ``barh`` (ascending private count → rarest at bottom, most common at top).
+    """
+    ranked = sorted(active, key=lambda t: (-private.topic_counts.get(t, 0), t))
+    if plot_top <= 0 or plot_top >= len(ranked):
+        chosen = ranked
+        excluded: list[str] = []
+    else:
+        chosen = ranked[:plot_top]
+        excluded = ranked[plot_top:]
+
+    display_order = sorted(chosen, key=lambda t: (private.topic_counts.get(t, 0), t))
+    return display_order, excluded
+
+
 # ── Plotting ──────────────────────────────────────────────────────────────────
 
 def plot(
@@ -191,13 +217,20 @@ def plot(
     private: AnalysisResult,
     topic_order_full: list[str],
     output: Path | None,
-) -> None:
+    *,
+    plot_top: int = 0,
+) -> list[str]:
     """
     Horizontal bar chart; only topics with nonzero total count across both splits.
 
-    Categories are ordered by **private-set** frequency (ascending): least common
-    near the bottom of the chart, **most common at the top**. Both panels share
-    this order for comparison.
+    Categories are ordered by **private-set** frequency (ascending among plotted rows):
+    least common near the bottom, **most common at the top**.
+
+    If ``plot_top`` > 0, only the ``plot_top`` topics with the largest private-set
+    counts are shown (figure only). Stdout tables are unaffected; omitted topics are
+    listed on stdout after the tables for use in captions.
+
+    Returns topics omitted from the figure when ``plot_top`` limits apply.
     """
     combined_total = Counter()
     combined_total.update(public.topic_counts)
@@ -210,34 +243,59 @@ def plot(
     ]
     active.extend(extras)
 
-    # barh lists categories bottom→top; ascending private count → largest count at top
-    active.sort(key=lambda t: (private.topic_counts.get(t, 0), t))
+    plot_topics, excluded_from_plot = _select_plot_topics(active, private, plot_top)
 
-    if not active:
+    if not plot_topics:
         print("Nothing to plot (no topic counts).", file=sys.stderr)
-        return
+        return excluded_from_plot
 
-    palette = sns.color_palette("muted", n_colors=len(active))
+    palette = sns.color_palette("muted", n_colors=len(plot_topics))
+
+    n_bars = len(plot_topics)
+    # 3:1 aspect ratio (width = 3 × height)
+    fig_h = max(2.8, min(n_bars * 0.21, 8.2))
+    fig_w = 3.0 * fig_h
 
     fig, axes = plt.subplots(
         1, 2,
-        figsize=(14, max(4, len(active) * 0.55)),
+        figsize=(fig_w, fig_h),
         sharey=True,
     )
+
+    _title_fs = 12
+    _axis_fs = 11
+    _tick_fs = 10
+    _ann_fs = 10
 
     for ax, (result, split_name) in zip(
         axes,
         [(public, "Public Set"), (private, "Private Set")],
     ):
         n = result.n_total
-        values = [result.topic_counts.get(t, 0) for t in active]
+        values = [result.topic_counts.get(t, 0) for t in plot_topics]
         max_val = max(values) if any(v > 0 for v in values) else 1
 
+        ax.set_xlim(0, max_val * 1.42)
+        ax.spines["top"].set_visible(False)
+        ax.spines["right"].set_visible(False)
+        ax.xaxis.set_major_locator(mticker.MaxNLocator(integer=True, nbins=5))
+        ax.set_axisbelow(True)
+        ax.grid(
+            axis="x",
+            which="major",
+            linestyle="-",
+            linewidth=0.55,
+            color="0.72",
+            alpha=0.65,
+            zorder=0,
+        )
+
         bars = ax.barh(
-            active, values,
+            plot_topics, values,
             color=palette,
             edgecolor="white",
             linewidth=0.6,
+            zorder=2,
         )
 
         for bar, val in zip(bars, values):
@@ -248,20 +306,16 @@ def plot(
                 bar.get_width() + max_val * 0.015,
                 bar.get_y() + bar.get_height() / 2.0,
                 f"{val:,}  ({pct:.1f}%)",
-                va="center", ha="left", fontsize=8,
+                va="center", ha="left", fontsize=_ann_fs,
             )
 
-        ax.set_title(f"{split_name}  (n = {n:,})", fontsize=13, fontweight="bold", pad=10)
-        ax.set_xlabel("Number of Problems", fontsize=11)
-        ax.set_xlim(0, max_val * 1.42)
-        ax.spines["top"].set_visible(False)
-        ax.spines["right"].set_visible(False)
-        ax.xaxis.set_major_locator(mticker.MaxNLocator(integer=True, nbins=5))
-        ax.tick_params(axis="both", labelsize=9)
+        ax.set_title(f"{split_name}  (n = {n:,})", fontsize=_title_fs, fontweight="bold", pad=8)
+        ax.set_xlabel("Number of Problems", fontsize=_axis_fs)
+        ax.tick_params(axis="both", labelsize=_tick_fs)
 
-    axes[0].set_ylabel("Topic", fontsize=11)
+    axes[0].set_ylabel("Topic", fontsize=_axis_fs)
 
-    plt.tight_layout()
+    fig.tight_layout()
 
     if output:
         output.parent.mkdir(parents=True, exist_ok=True)
@@ -269,6 +323,8 @@ def plot(
         print(f"\nSaved → {output}")
     else:
         plt.show()
+
+    return excluded_from_plot
 
 
 # ── CLI ───────────────────────────────────────────────────────────────────────
@@ -297,7 +353,17 @@ def main() -> None:
         help="Save the figure to this path (e.g. analysis/breakdown.pdf). "
              "Displayed interactively if omitted.",
     )
+    parser.add_argument(
+        "--plot-top",
+        type=int,
+        default=0,
+        metavar="N",
+        help="Figure only: show only the N topics with the largest counts on the "
+             "**private** split (0 = show all). Stdout tables are unchanged.",
+    )
     args = parser.parse_args()
+    if args.plot_top < 0:
+        parser.error("--plot-top must be >= 0")
 
     print("Loading datasets …")
     public_items  = _load_jsonl(PUBLIC_DATA)
@@ -345,7 +411,21 @@ def main() -> None:
     _print_topic_table(public_result,  topic_order_full, split_title="Public Set")
     _print_topic_table(private_result, topic_order_full, split_title="Private Set")
 
-    plot(public_result, private_result, topic_order_full, args.output)
+    excluded = plot(
+        public_result,
+        private_result,
+        topic_order_full,
+        args.output,
+        plot_top=args.plot_top,
+    )
+
+    if args.plot_top > 0 and excluded:
+        topics_str = ", ".join(f'"{t}"' for t in sorted(excluded))
+        print(
+            f"\n── Figure note (--plot-top {args.plot_top}) ─────────────────────────────\n"
+            f"  Topics omitted from the plot (not among the top {args.plot_top} by "
+            f"**private-set** count): {topics_str}",
+        )
 
 
 if __name__ == "__main__":
