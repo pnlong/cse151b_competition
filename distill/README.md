@@ -141,7 +141,7 @@ Models are grouped by family. Run as many as feasible — more diverse teachers 
 
 ### Recommended run order
 
-Run the highest-quality models first (they give the most training signal). Lower-quality models are worth running if you have time — even a 40% filter rate on 1116 questions yields ~450 extra correct traces.
+Run the highest-quality models first (they give the most training signal). Lower-quality models are worth running if you have time — even a 40% filter rate on 1126 questions yields ~450 extra correct traces.
 
 ```bash
 # 1. DeepSeek-R1-Distill-Qwen-32B (best reasoning traces, 1 GPU)

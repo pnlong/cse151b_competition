@@ -153,10 +153,30 @@ def _print_topic_table(
     split_title: str,
 ) -> None:
     print(f"\n  {split_title}  (n = {result.n_total:,})")
+    order_set = frozenset(topic_order)
+    listed_sum = 0
     for topic in topic_order:
         cnt = result.topic_counts.get(topic, 0)
+        listed_sum += cnt
         pct = 100.0 * cnt / result.n_total if result.n_total else 0.0
         print(f"    {topic:<30}  {cnt:>5,}  ({pct:.1f}%)")
+    # Counts for keys not in CANONICAL_TOPIC_ORDER (e.g. __MISSING__ from CSV lookup)
+    # were previously omitted, so rows could not sum to n and looked like a split-size bug.
+    extras = sorted(
+        (t, result.topic_counts[t])
+        for t in result.topic_counts
+        if t not in order_set and result.topic_counts[t] > 0
+    )
+    for topic, cnt in extras:
+        listed_sum += cnt
+        pct = 100.0 * cnt / result.n_total if result.n_total else 0.0
+        print(f"    {topic:<30}  {cnt:>5,}  ({pct:.1f}%)")
+    if result.n_total and listed_sum != result.n_total:
+        print(
+            f"  Warning: topic counts sum to {listed_sum} but n = {result.n_total} "
+            f"for {split_title}.",
+            file=sys.stderr,
+        )
 
 
 def _select_plot_topics(

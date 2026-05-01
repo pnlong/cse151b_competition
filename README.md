@@ -42,7 +42,7 @@ final/
 ├── judger.py                     Competition-provided answer judging logic — do not modify
 │
 ├── data/
-│   ├── public.jsonl              1116 problems with ground-truth answers (local eval)
+│   ├── public.jsonl              1126 problems with ground-truth answers (local eval)
 │   └── private.jsonl             893 problems without answers (leaderboard submission)
 │
 ├── inference/                    Baseline inference pipeline → README inside

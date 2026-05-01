@@ -84,7 +84,7 @@ Start from the SFT checkpoint.
 - [ ] Create `distill/` subdirectory
 - [ ] Build `distill/collect.py`: sends problems to teacher model, verifies answer, saves traces
 - [ ] Decide on teacher: Claude API vs local Qwen2.5-Math-72B / DeepSeek-R1-Distill-Qwen-32B
-- [ ] Process public.jsonl (1116 problems with known answers) as primary distillation source
+- [ ] Process public.jsonl (1126 problems with known answers) as primary distillation source
 - [ ] Explore NuminaMath / MATH / AIME datasets for additional SFT data
 
 ### Medium term — SFT

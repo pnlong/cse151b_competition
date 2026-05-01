@@ -112,7 +112,7 @@ python inference/evaluate.py --results /deepfreeze/pnlong/school/cse151b/final/r
 ## Stage 2: Knowledge Distillation
 
 **Goal**: collect a large set of high-quality reasoning traces from stronger teacher models to use as SFT training data. Two sources:
-- **Public split** (1116 questions, ground truth known) → keep only correct traces
+- **Public split** (1126 questions, ground truth known) → keep only correct traces
 - **Private split** (893 questions, no ground truth) → pseudo-label via majority vote
 
 **Scripts**: `distill/collect.py`, `distill/merge.py`
@@ -182,11 +182,11 @@ Runs are **append-safe**: re-running skips question IDs already saved. If a run 
 
 ### Verifying collection quality
 
-**Public set — filter rate** (automatic, printed by `collect.py`):
+**Public set — filter rate** (automatic, printed by `collect.py`; line shape below is illustrative — re-run to match your teacher and `public.jsonl`):
 ```
-Public : 743 correct traces from 8928 responses (1116 questions)
+Public : 743 correct traces from 8928 responses (1126 questions)
 ```
-This is the most direct quality signal per teacher. `743/8928 ≈ 8.3%` per-response accuracy, meaning ~66% of questions got at least one correct trace. Higher is better; expect strong math models (DeepSeek-R1, Qwen2.5-Math) to hit 60–80% of questions covered.
+This is the most direct quality signal per teacher. The ratio `n_correct / n_responses` is per-response accuracy; the script also reflects what fraction of questions received at least one correct trace. Higher is better; expect strong math models (DeepSeek-R1, Qwen2.5-Math) to hit 60–80% of questions covered.
 
 **Public set — full accuracy score** (optional, run after collection):
 ```bash

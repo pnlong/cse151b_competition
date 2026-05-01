@@ -1,6 +1,6 @@
 # Experiments
 
-All experiments evaluate on `data/public.jsonl` (1116 problems with ground-truth answers) using `inference/evaluate.py`, which scores each prediction through the competition `Judger` and reports **MCQ accuracy**, **free-form accuracy**, and **overall accuracy**. Final leaderboard submissions run on `data/private.jsonl` (893 problems, no ground truth).
+All experiments evaluate on `data/public.jsonl` (1126 problems with ground-truth answers) using `inference/evaluate.py`, which scores each prediction through the competition `Judger` and reports **MCQ accuracy**, **free-form accuracy**, and **overall accuracy**. Final leaderboard submissions run on `data/private.jsonl` (893 problems, no ground truth).
 
 Results CSVs and the running comparison log all land in `STORAGE_DIR/results/` (`/deepfreeze/pnlong/school/cse151b/final/results/`). The log file `eval_log.csv` grows one row per `evaluate.py` call and records timestamp, model, checkpoint stage, n\_samples, MCQ/free-form/overall accuracy, and any free-text notes — making side-by-side comparison across all experiments straightforward.
 
@@ -151,7 +151,7 @@ Restore `enable_thinking=True` after running.
 ## Experiment 2 — Knowledge Distillation + Supervised Fine-Tuning (SFT)
 
 **Goal**: improve Qwen3-4B by fine-tuning on high-quality reasoning traces distilled from larger teacher models. Two data sources:
-- **Public split** (1116 problems, ground truth available) — keep only teacher traces the `Judger` marks correct.
+- **Public split** (1126 problems, ground truth available) — keep only teacher traces the `Judger` marks correct.
 - **Private split** (893 problems, no ground truth) — pseudo-label via majority vote across N=8 teacher samples.
 
 ### 2a. Trace collection
