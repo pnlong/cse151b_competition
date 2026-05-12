@@ -28,6 +28,10 @@ private_traces.jsonl  ─┘  (--no-private to exclude)
 python distill/collect.py --model Qwen/Qwen3-32B \
     --public-only --limit 5 --n-samples 2
 
+# 1b. Debug one teacher on 1–2 public questions (verbose, no trace files)
+CUDA_VISIBLE_DEVICES=0,1 python distill/debug_collect.py --gpu --tp 2 --quantize \
+    --model deepseek-ai/DeepSeek-R1-Distill-Qwen-32B
+
 # 2. Full run — Qwen3-32B, both splits, single GPU
 CUDA_VISIBLE_DEVICES=0 python distill/collect.py --gpu \
     --model Qwen/Qwen3-32B --quantize
@@ -45,6 +49,8 @@ python distill/merge.py --no-private
 
 Generates N responses per question, filters public traces by correctness, and pseudo-labels private traces via majority vote. **Append-safe**: re-running skips question IDs already in the output file, so interrupted runs can be resumed.
 
+For **DeepSeek-R1 / R1-Distill** HuggingFace ids, vLLM receives the rendered chat **string** (not client-side `prompt_token_ids`) so tokenization matches the model’s special AddedTokens, and **`enforce_eager=True`** is set when constructing the engine (mitigates known vLLM CUDA-graph / compile bugs that can yield degenerate repetition on this family). If output is still garbage, try **without** `--quantize` (bitsandbytes INT8 can be unstable with some vLLM builds).
+
 **Key options:**
 
 | Flag | Default | Description |
@@ -61,6 +67,34 @@ Generates N responses per question, filters public traces by correctness, and ps
 **Output files** under `DISTILL_DIR/{model-slug}/`:
 - `public_traces.jsonl` — `{id, question, options, answer, response}` (correct only)
 - `private_traces.jsonl` — `{id, question, options, response}` (pseudo-labeled)
+
+---
+
+## `debug_collect.py` — inspect 1–2 questions before a full run
+
+Same tokenizer, vLLM settings, prompts, and `verify_trace` logic as `collect.py`, but prints diagnostics to the terminal and **does not write** any trace JSONL. Use this when a teacher is producing “0 correct traces” or you want to see raw outputs (including chain-of-thought) before committing GPU time to a full collection.
+
+**Defaults:** prints the **entire** question text and the **entire** raw model output (thinking block + final answer). Pass `--question-chars` / `--response-chars` with a positive limit if you want truncation.
+
+**Example** (matches a two-GPU quantized DeepSeek teacher):
+
+```bash
+CUDA_VISIBLE_DEVICES=0,1 python distill/debug_collect.py --gpu --tp 2 --quantize \
+    --model deepseek-ai/DeepSeek-R1-Distill-Qwen-32B
+```
+
+By default it runs **two rows from `public.jsonl`** so gold labels exist and `verify_trace` is meaningful.
+
+**Useful flags:**
+
+| Flag | Default | Description |
+|------|---------|-------------|
+| `--num-questions` | `2` | How many dataset rows to run |
+| `--n-samples` | `1` | Responses per question |
+| `--start-index` | `0` | Skip the first N public (or private) rows |
+| `--split` | `public` | `public` (has gold) or `private` (no verify) |
+| `--question-chars` | `0` | Clip printed question (`0` = full question) |
+| `--response-chars` | `0` | Clip printed model output and `Judger.extract_ans` (`0` = full) |
 
 ---
 

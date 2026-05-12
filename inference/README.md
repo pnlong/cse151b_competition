@@ -110,7 +110,10 @@ Extends the repo-root `utils.py` (math answer helpers) with inference-specific f
 | `answer_key(response, n_slots, is_mcq)` | Canonical voting key from one response |
 | `majority_vote(responses, n_slots, is_mcq)` | Returns the winning response from a group |
 | `build_prompt(question, options, …)` | Constructs (system, user) pair from constants |
-| `apply_chat_template_safe(tokenizer, messages)` | Applies chat template with `enable_thinking` fallback |
+| `apply_chat_template_safe(tokenizer, messages)` | Qwen3: tries `enable_thinking=True`; DeepSeek-R1 / R1-Distill: **`enable_thinking=False` explicitly** (omitting the flag often leaves the Jinja default at True → corrupt prompts / `!` loops) |
+| `tokenizer_chat_template_debug(tokenizer)` | One-line string for logging which chat-template branch applies |
+| `model_id_is_deepseek_r1_distill(model_id)` | Heuristic on the HF id / path (including snapshot directory basename) |
+| `is_deepseek_r1_vllm_special_case(tokenizer, model_id)` | OR of the above with tokenizer identity; drives string `prompt` + `enforce_eager` in `collect.py` / `infer.py` |
 | `load_jsonl(path)` | Read JSONL → list of dicts |
 | `save_jsonl(records, path)` | Write list of dicts → JSONL |
 | `save_submission_csv(rows, path)` | Write `[{id, response}]` → competition CSV |

@@ -26,12 +26,16 @@ then return a JSONL record for every problem.
    The quality of the reasoning trace is the training signal, not just the answer.
 
 2. **Conclude with a clearly marked final answer:**
+   - Always box your final answer using LaTeX: `$\boxed{<value>}$`.
    - **Multiple-choice** (`options` present): end with `The answer is <letter>.`
-     where `<letter>` is the single option letter (A, B, C, …).
+     where `<letter>` is the single option letter (A, B, C, …), and box it:
+     `$\boxed{<letter>}$`.
    - **Fill-in-the-blank** (`[ANS]` in question): end with
      `The answer is <val1> [and <val2> ...]` in the same order the `[ANS]`
-     slots appear. Include units if the question implies them.
+     slots appear. Include units if the question implies them. Box each value:
+     `$\boxed{<val1>}$, $\boxed{<val2>}$, ...`
    - **Open-ended** (no options, no `[ANS]`): end with `The answer is <value>.`
+     and box it: `$\boxed{<value>}$`.
 
 3. Use LaTeX for math expressions (e.g. `$x^2 + 1$`, `$\int_0^1 f(x)\,dx$`).
 

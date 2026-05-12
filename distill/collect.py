@@ -68,6 +68,7 @@ from constants import (
     MULTI_ANS_NOTE,
 )
 from config import PUBLIC_DATA, PRIVATE_DATA, HF_CACHE_DIR
+from inference.utils import is_deepseek_r1_vllm_special_case
 from distill.utils import (
     load_jsonl,
     save_jsonl,
@@ -117,11 +118,37 @@ def parse_args():
 
 # ── Helpers ────────────────────────────────────────────────────────────────────
 
-def load_existing_ids(path: Path) -> set:
-    """Return the set of question IDs already written to an output file."""
-    if not path.exists():
+def _attempted_path(traces_path: Path) -> Path:
+    """Sidecar file that tracks every question ID that was attempted,
+    regardless of whether any correct trace was produced."""
+    return traces_path.with_suffix(".attempted.txt")
+
+
+def load_attempted_ids(traces_path: Path) -> set:
+    """Return the set of question IDs that have been attempted.
+
+    Reads from the sidecar <name>.attempted.txt when it exists (new behaviour).
+    Falls back to the traces file itself so that runs started before this change
+    still resume correctly (old behaviour: only questions with correct traces are
+    counted as done — this under-counts, but is at least safe).
+    """
+    sidecar = _attempted_path(traces_path)
+    if sidecar.exists():
+        with open(sidecar) as f:
+            return {line.strip() for line in f if line.strip()}
+    # Legacy fallback: use the traces file (may under-count for public split)
+    if not traces_path.exists():
         return set()
-    return {str(r["id"]) for r in load_jsonl(path)}
+    return {str(r["id"]) for r in load_jsonl(traces_path)}
+
+
+def append_attempted_ids(ids: list, traces_path: Path) -> None:
+    """Append a batch of attempted question IDs to the sidecar file."""
+    sidecar = _attempted_path(traces_path)
+    sidecar.parent.mkdir(parents=True, exist_ok=True)
+    with open(sidecar, "a") as f:
+        for qid in ids:
+            f.write(f"{qid}\n")
 
 
 def get_model_max_seq_len(model_id: str, requested: int) -> int:
@@ -142,12 +169,18 @@ def get_model_max_seq_len(model_id: str, requested: int) -> int:
     return requested
 
 
-def build_token_ids(items: list[dict], tokenizer) -> list[list[int]]:
+def build_vllm_request_dicts(items: list[dict], tokenizer, model_id: str) -> list[dict]:
     """
-    Pre-tokenize one prompt per question and return token ID lists.
-    Pre-tokenising avoids vLLM re-tokenising every duplicate when N > 1.
+    Build one vLLM input dict per question: {"prompt": str} or {"prompt_token_ids": [...]}.
+
+    DeepSeek-R1 / Distill chat templates embed special AddedTokens (often with
+    Unicode delimiter code points). Feeding prompt_token_ids from a separate
+    tokenizer.encode call can disagree with vLLM's internal tokenization,
+    producing degenerate generations. For those checkpoints we pass the
+    rendered chat string and let vLLM tokenize.
     """
-    ids_list = []
+    use_prompt_str = is_deepseek_r1_vllm_special_case(tokenizer, model_id)
+    out: list[dict] = []
     for item in items:
         system, user = build_prompt(
             item["question"], item.get("options"),
@@ -158,20 +191,26 @@ def build_token_ids(items: list[dict], tokenizer) -> list[list[int]]:
             [{"role": "system", "content": system},
              {"role": "user",   "content": user}],
         )
-        ids_list.append(tokenizer.encode(text, add_special_tokens=False))
-    return ids_list
+        if use_prompt_str:
+            out.append({"prompt": text})
+        else:
+            out.append({
+                "prompt_token_ids": tokenizer.encode(text, add_special_tokens=False),
+            })
+    return out
 
 
-def generate_chunk(prompt_ids: list[list[int]], llm: LLM,
+def generate_chunk(base_requests: list[dict], llm: LLM,
                    sampling_params: SamplingParams, n: int) -> list[list[str]]:
     """
     Generate N responses per question for a chunk of questions.
-    Returns a list of length len(prompt_ids), each element a list of N strings.
+    *base_requests* is one dict per question (prompt string or prompt_token_ids list).
+    Returns a list of length len(base_requests), each element a list of N strings.
     """
-    repeated = [{"prompt_token_ids": ids} for ids in prompt_ids for _ in range(n)]
+    repeated = [dict(req) for req in base_requests for _ in range(n)]
     outputs  = llm.generate(repeated, sampling_params=sampling_params)
     flat     = [out.outputs[0].text.strip() for out in outputs]
-    return [flat[i * n : (i + 1) * n] for i in range(len(prompt_ids))]
+    return [flat[i * n : (i + 1) * n] for i in range(len(base_requests))]
 
 
 # ── Sanity check ──────────────────────────────────────────────────────────────
@@ -207,17 +246,17 @@ def sanity_check(out_path: Path, split: str) -> None:
 def process_public_chunked(data: list[dict], out_path: Path,
                             llm: LLM, sampling_params: SamplingParams,
                             tokenizer, n: int, chunk_size: int,
-                            judger: Judger, reset: bool) -> None:
+                            judger: Judger, reset: bool, model_id: str) -> None:
     """
     Chunked, append-safe public trace collection.
     For each question, keeps every response that Judger verifies as correct.
     Writes results after every chunk_size questions so progress is preserved.
     """
-    existing_ids = set() if reset else load_existing_ids(out_path)
+    existing_ids = set() if reset else load_attempted_ids(out_path)
     todo = [item for item in data if str(item["id"]) not in existing_ids]
 
     if existing_ids:
-        print(f"  [resume] {len(existing_ids)} public questions already done, "
+        print(f"  [resume] {len(existing_ids)} public questions already attempted, "
               f"{len(todo)} remaining")
     if not todo:
         print("  Public: nothing to do — all questions already processed.")
@@ -228,8 +267,8 @@ def process_public_chunked(data: list[dict], out_path: Path,
 
     for chunk_start in range(0, len(todo), chunk_size):
         chunk      = todo[chunk_start : chunk_start + chunk_size]
-        prompt_ids = build_token_ids(chunk, tokenizer)
-        groups     = generate_chunk(prompt_ids, llm, sampling_params, n)
+        requests = build_vllm_request_dicts(chunk, tokenizer, model_id)
+        groups     = generate_chunk(requests, llm, sampling_params, n)
 
         new_records = []
         for item, responses in zip(chunk, groups):
@@ -247,9 +286,12 @@ def process_public_chunked(data: list[dict], out_path: Path,
                     })
                     total_correct += 1
 
-        # Append to existing file
+        # Append correct traces to output file
         existing_records = load_jsonl(out_path) if out_path.exists() else []
         save_jsonl(existing_records + new_records, out_path)
+
+        # Record every attempted ID so resume skips them even if 0 correct traces
+        append_attempted_ids([str(item["id"]) for item in chunk], out_path)
 
         pbar.update(len(chunk))
         tqdm.write(f"  wrote {len(new_records)} correct traces from chunk "
@@ -263,17 +305,17 @@ def process_public_chunked(data: list[dict], out_path: Path,
 def process_private_chunked(data: list[dict], out_path: Path,
                              llm: LLM, sampling_params: SamplingParams,
                              tokenizer, n: int, chunk_size: int,
-                             reset: bool) -> None:
+                             reset: bool, model_id: str) -> None:
     """
     Chunked, append-safe private trace collection.
     For each question, picks the majority-vote response as a pseudo-labeled trace.
     Writes results after every chunk_size questions so progress is preserved.
     """
-    existing_ids = set() if reset else load_existing_ids(out_path)
+    existing_ids = set() if reset else load_attempted_ids(out_path)
     todo = [item for item in data if str(item["id"]) not in existing_ids]
 
     if existing_ids:
-        print(f"  [resume] {len(existing_ids)} private questions already done, "
+        print(f"  [resume] {len(existing_ids)} private questions already attempted, "
               f"{len(todo)} remaining")
     if not todo:
         print("  Private: nothing to do — all questions already processed.")
@@ -284,8 +326,8 @@ def process_private_chunked(data: list[dict], out_path: Path,
 
     for chunk_start in range(0, len(todo), chunk_size):
         chunk      = todo[chunk_start : chunk_start + chunk_size]
-        prompt_ids = build_token_ids(chunk, tokenizer)
-        groups     = generate_chunk(prompt_ids, llm, sampling_params, n)
+        requests = build_vllm_request_dicts(chunk, tokenizer, model_id)
+        groups     = generate_chunk(requests, llm, sampling_params, n)
 
         new_records = []
         for item, responses in zip(chunk, groups):
@@ -301,6 +343,7 @@ def process_private_chunked(data: list[dict], out_path: Path,
 
         existing_records = load_jsonl(out_path) if out_path.exists() else []
         save_jsonl(existing_records + new_records, out_path)
+        append_attempted_ids([str(item["id"]) for item in chunk], out_path)
         total_new += len(new_records)
 
         pbar.update(len(chunk))
@@ -335,6 +378,12 @@ def main():
     out_dir = traces_dir(args.model)
     public_out  = out_dir / "public_traces.jsonl"
     private_out = out_dir / "private_traces.jsonl"
+
+    if args.reset:
+        for p in (public_out, private_out,
+                  _attempted_path(public_out), _attempted_path(private_out)):
+            if p.exists():
+                p.unlink()
 
     do_public  = not args.private_only
     do_private = not args.public_only
@@ -395,8 +444,14 @@ def main():
     else:
         llm_kwargs["device"] = "cpu"
 
+    if is_deepseek_r1_vllm_special_case(tokenizer, args.model):
+        llm_kwargs["enforce_eager"] = True
+
     llm = LLM(**llm_kwargs)
     print(f"      Model ready.")
+    if is_deepseek_r1_vllm_special_case(tokenizer, args.model):
+        print("      [vllm] DeepSeek-R1: string prompts + enforce_eager=True "
+              "(vLLM CUDA-graph / compile glitches on this family).")
 
     sampling_params = SamplingParams(
         max_tokens=max_tokens,
@@ -417,12 +472,12 @@ def main():
 
     if do_public and pub_data:
         process_public_chunked(pub_data, public_out, llm, sampling_params,
-                               tokenizer, N, args.chunk_size, judger, args.reset)
+                               tokenizer, N, args.chunk_size, judger, args.reset, args.model)
         sanity_check(public_out, "public")
 
     if do_private and priv_data:
         process_private_chunked(priv_data, private_out, llm, sampling_params,
-                                tokenizer, N, args.chunk_size, args.reset)
+                                tokenizer, N, args.chunk_size, args.reset, args.model)
         sanity_check(private_out, "private")
 
     print(f"\nDone. Traces saved to {out_dir}/")

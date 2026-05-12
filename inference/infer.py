@@ -67,6 +67,7 @@ from inference.utils import (
     apply_chat_template_safe,
     count_ans_slots,
     majority_vote,
+    is_deepseek_r1_vllm_special_case,
 )
 
 
@@ -124,7 +125,7 @@ def load_done_ids(out_path: Path) -> set:
     if not out_path.exists():
         return set()
     with open(out_path, newline="") as f:
-        return {row["id"] for row in csv.DictReader(f)}
+        return {str(row["id"]) for row in csv.DictReader(f)}
 
 
 def append_rows(rows: list[dict], out_path: Path, write_header: bool) -> None:
@@ -156,7 +157,7 @@ def main():
         data = data[: args.limit]
 
     done_ids = set() if args.reset else load_done_ids(out_path)
-    todo     = [item for item in data if item["id"] not in done_ids]
+    todo     = [item for item in data if str(item["id"]) not in done_ids]
 
     n_mcq  = sum(bool(d.get("options")) for d in data)
     n_free = len(data) - n_mcq
@@ -219,8 +220,14 @@ def main():
     else:
         llm_kwargs["device"] = "cpu"
 
+    if is_deepseek_r1_vllm_special_case(tokenizer, args.model):
+        llm_kwargs["enforce_eager"] = True
+
     llm = LLM(**llm_kwargs)
     print(f"      Model ready.")
+    if is_deepseek_r1_vllm_special_case(tokenizer, args.model):
+        print("      [vllm] DeepSeek-R1: string prompts + enforce_eager=True "
+              "(vLLM CUDA-graph / compile glitches on this family).")
 
     sampling_params = SamplingParams(
         max_tokens=args.max_tokens,
@@ -245,8 +252,10 @@ def main():
     for chunk_start in chunks:
         chunk = todo[chunk_start : chunk_start + args.chunk_size]
 
-        # Pre-tokenize once per unique prompt (avoids vLLM re-tokenising N copies)
-        chunk_ids = []
+        # Pre-tokenize once per unique prompt (avoids vLLM re-tokenising N copies),
+        # except DeepSeek-R1 / Distill: use string prompts so vLLM tokenization matches.
+        use_str = is_deepseek_r1_vllm_special_case(tokenizer, args.model)
+        chunk_inputs: list[dict] = []
         if router is None:
             for item in chunk:
                 system, user = build_prompt(
@@ -258,7 +267,12 @@ def main():
                     [{"role": "system", "content": system},
                      {"role": "user",   "content": user}],
                 )
-                chunk_ids.append(tokenizer.encode(text, add_special_tokens=False))
+                if use_str:
+                    chunk_inputs.append({"prompt": text})
+                else:
+                    chunk_inputs.append({
+                        "prompt_token_ids": tokenizer.encode(text, add_special_tokens=False),
+                    })
         else:
             routed = build_routed_prompts(router, chunk)
             for system, user in routed:
@@ -267,9 +281,14 @@ def main():
                     [{"role": "system", "content": system},
                      {"role": "user",   "content": user}],
                 )
-                chunk_ids.append(tokenizer.encode(text, add_special_tokens=False))
+                if use_str:
+                    chunk_inputs.append({"prompt": text})
+                else:
+                    chunk_inputs.append({
+                        "prompt_token_ids": tokenizer.encode(text, add_special_tokens=False),
+                    })
 
-        all_prompts = [{"prompt_token_ids": ids} for ids in chunk_ids for _ in range(N)]
+        all_prompts = [dict(inp) for inp in chunk_inputs for _ in range(N)]
         outputs     = llm.generate(all_prompts, sampling_params=sampling_params)
         flat_resps  = [out.outputs[0].text.strip() for out in outputs]
 

@@ -31,10 +31,11 @@ from utils import (           # noqa: E402  (import after sys.path manipulation)
 # Re-export so callers can do `from inference.utils import last_boxed_only_string`
 __all__ = [
     "last_boxed_only_string", "remove_boxed", "norm_str2bool", "fix_sqrt", "fix_fracs",
-    "extract_last_boxed", "split_top_level_commas", "norm_for_vote",
+    "extract_last_boxed", "final_answer_segment", "split_top_level_commas", "norm_for_vote",
     "count_ans_slots", "answer_key", "majority_vote",
     "extract_letter", "score_mcq",
-    "build_prompt", "apply_chat_template_safe",
+    "build_prompt", "apply_chat_template_safe", "tokenizer_chat_template_debug",
+    "model_id_is_deepseek_r1_distill", "is_deepseek_r1_vllm_special_case",
     "load_jsonl", "save_jsonl", "save_submission_csv", "save_results_jsonl",
 ]
 
@@ -49,6 +50,21 @@ def extract_last_boxed(text: str) -> Optional[str]:
     don't need to chain two calls.
     """
     return remove_boxed(last_boxed_only_string(text))
+
+
+def final_answer_segment(text: str) -> str:
+    """
+    Return the substring after the last "</think>" close tag, if present.
+
+    Content before that marker is treated as chain-of-thought and may contain
+    misleading \\boxed{} snippets; the final answer is expected after it. Same
+    post-thinking substring used when extracting \\boxed{} from long CoT outputs.
+    """
+    tag = "</think>"
+    i = text.rfind(tag)
+    if i >= 0:
+        return text[i + len(tag) :]
+    return text
 
 
 # ── Answer normalization ───────────────────────────────────────────────────────
@@ -108,7 +124,10 @@ def answer_key(response: str, n_slots: int, is_mcq: bool) -> str:
     - N-slot     : norm_for_vote of each comma part, joined with "|"
     Returns "" when no parseable answer is found.
     """
-    raw = extract_last_boxed(response)
+    seg = final_answer_segment(response)
+    raw = extract_last_boxed(seg)
+    if raw is None:
+        raw = extract_last_boxed(response)
     if raw is None:
         return ""
 
@@ -174,16 +193,113 @@ def build_prompt(question: str, options: Optional[list],
     return system_math, question
 
 
+def _tokenizer_model_ref(tokenizer) -> str:
+    """Best-effort string to classify the checkpoint (HF id or cache path)."""
+    parts = [
+        getattr(tokenizer, "name_or_path", None) or "",
+        getattr(getattr(tokenizer, "config", None), "name_or_path", None) or "",
+        getattr(getattr(tokenizer, "config", None), "_name_or_path", None) or "",
+    ]
+    ik = getattr(tokenizer, "init_kwargs", None)
+    if isinstance(ik, dict):
+        parts.append(str(ik.get("pretrained_model_name_or_path") or ""))
+        parts.append(str(ik.get("_name_or_path") or ""))
+    return " ".join(str(p) for p in parts).lower()
+
+
+def _deepseek_r1_distill_chat(tokenizer) -> bool:
+    """True if we must not use Qwen3-style enable_thinking=True (breaks prompts / generation)."""
+    m = _tokenizer_model_ref(tokenizer)
+    if not m.strip():
+        return False
+    if "deepseek-r1" in m or "deepseek_r1" in m:
+        return True
+    if "r1-distill" in m or "r1_distill" in m:
+        return True
+    if "deepseek" in m and "distill" in m and "qwen" in m:
+        return True
+    return False
+
+
+def model_id_is_deepseek_r1_distill(model_id: str) -> bool:
+    """
+    True for HuggingFace ids / local paths of DeepSeek-R1 and R1-Distill checkpoints.
+
+    Used to choose vLLM string prompts versus client-side prompt_token_ids:
+    pre-tokenized ids can disagree with vLLM's tokenizer for these models'
+    Unicode AddedToken delimiters, causing degenerate output (e.g. repeated
+    punctuation to max_tokens).
+    """
+    m = (model_id or "").lower()
+    if "deepseek-r1" in m or "deepseek_r1" in m:
+        return True
+    if "r1-distill" in m or "r1_distill" in m:
+        return True
+    if "deepseek" in m and "distill" in m and "qwen" in m:
+        return True
+    # Local dirs often look like .../DeepSeek-R1-Distill-Qwen-32B/snapshots/<hash>
+    try:
+        base = Path(model_id).name.lower()
+        if "deepseek" in base and "r1" in base:
+            return True
+        if "r1-distill" in base or "r1_distill" in base:
+            return True
+    except Exception:
+        pass
+    return False
+
+
+def is_deepseek_r1_vllm_special_case(tokenizer, model_id: str) -> bool:
+    """
+    True when vLLM should apply DeepSeek-R1 mitigations (string prompt input,
+    enforce_eager=True): either the CLI model id or the loaded tokenizer
+    identity matches DeepSeek-R1 / R1-Distill.
+
+    Snapshot cache paths sometimes omit \"deepseek\" substrings that
+    model_id_is_deepseek_r1_distill would catch on the raw --model string;
+    the tokenizer name_or_path is then used as a fallback signal.
+    """
+    return model_id_is_deepseek_r1_distill(model_id) or _deepseek_r1_distill_chat(tokenizer)
+
+
 def apply_chat_template_safe(tokenizer, messages: list[dict]) -> str:
     """
-    Apply the tokenizer's chat template with thinking mode enabled if supported,
-    falling back gracefully if the tokenizer does not accept enable_thinking.
+    Apply the tokenizer's chat template with thinking mode enabled when appropriate.
+
+    Qwen3 native-thinking checkpoints use enable_thinking in the chat template when
+    the tokenizer supports that argument.
+
+    DeepSeek-R1 and R1-Distill models ship their own reasoning format; passing
+    enable_thinking=True (Qwen3-style) on those tokenizers corrupts the prompt
+    and can cause degenerate generations that repeat until max_tokens.
+
+    For those models we pass enable_thinking=False explicitly: omitting the flag
+    often leaves the Jinja default at True on Qwen-derived tokenizers.
     """
     kwargs = dict(tokenize=False, add_generation_prompt=True)
+    force_no_thinking = _deepseek_r1_distill_chat(tokenizer)
+
+    if force_no_thinking:
+        try:
+            return tokenizer.apply_chat_template(messages, enable_thinking=False, **kwargs)
+        except TypeError:
+            return tokenizer.apply_chat_template(messages, **kwargs)
+
     try:
         return tokenizer.apply_chat_template(messages, enable_thinking=True, **kwargs)
     except TypeError:
         return tokenizer.apply_chat_template(messages, **kwargs)
+
+
+def tokenizer_chat_template_debug(tokenizer) -> str:
+    """
+    One-line description for logs: checkpoint id guess and whether DeepSeek-R1
+    compat (explicit enable_thinking=False) is active.
+    """
+    ref = _tokenizer_model_ref(tokenizer).strip() or "(unknown)"
+    ds = _deepseek_r1_distill_chat(tokenizer)
+    mode = "enable_thinking=False (DeepSeek-R1 compat)" if ds else "enable_thinking=True if supported"
+    return f"checkpoint_ref={ref!r}  |  {mode}"
 
 
 # ── MCQ letter extraction ─────────────────────────────────────────────────────
@@ -192,15 +308,34 @@ def extract_letter(text: str) -> str:
     """
     Extract the answer letter from an MCQ response.
 
-    Primary:  looks for \\boxed{A} (single letter inside \\boxed{}).
-    Fallback: takes the last standalone uppercase letter A–J in the text.
+    Primary:  single letter inside the *last* \\boxed{...} in the final segment
+              (text after "</think>" if that tag appears), then the same
+              on the full string if needed — same strategy as answer_key (last \\boxed{}).
+    Fallback: last standalone uppercase letter A–J in that segment, then in the full text.
               A–J covers all possible option labels (options list has ≤ 10 items).
     """
-    m = re.search(r"\\boxed\{([A-Za-z])\}", text)
-    if m:
-        return m.group(1).upper()
-    matches = re.findall(r"\b([A-J])\b", text.upper())
-    return matches[-1] if matches else ""
+    seg = final_answer_segment(text)
+
+    def letter_from_boxed_inner(inner: str) -> str:
+        s = inner.strip().strip("()").strip("$")
+        m = re.match(r"^([A-Ja-j])\b", s)
+        if m:
+            return m.group(1).upper()
+        m = re.search(r"\b([A-Ja-j])\b", s.upper())
+        return m.group(1).upper() if m else ""
+
+    for scope in (seg, text):
+        raw = extract_last_boxed(scope)
+        if raw is not None:
+            letter = letter_from_boxed_inner(raw)
+            if letter:
+                return letter
+
+    for scope in (seg, text):
+        matches = re.findall(r"\b([A-J])\b", scope.upper())
+        if matches:
+            return matches[-1]
+    return ""
 
 
 def score_mcq(response: str, gold_letter: str) -> bool:
