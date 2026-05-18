@@ -6,6 +6,9 @@ Features:
   - Resume from checkpoint (--resume / --resume-from)
   - metrics_history.csv + statistics.pdf (loss + MCQ/FRQ/overall token accuracy on eval shard)
   - Optional periodic reload of train JSONL from disk (--reload-data-every / --reload-data-each-epoch)
+  - Multi-GPU: prefer ``torchrun --nproc_per_node=N ...`` (DDP, full replica per GPU). A single
+    process with ``device_map="auto"`` splits layers across GPUs and often shows poor SM balance.
+    Use ``--single-gpu`` to pin the whole model to the first visible GPU when one GPU is enough.
 
 HF cache: mirrors inference scripts — set HF_HOME before heavy imports.
 """
@@ -15,8 +18,10 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import math
 import os
 import sys
+import warnings
 from pathlib import Path
 
 _REPO_ROOT = Path(__file__).resolve().parent.parent
@@ -45,6 +50,7 @@ from sft.callbacks import (  # noqa: E402
     ReloadTrainDatasetCallback,
     ReloadTrainDatasetEachEpochCallback,
     StatisticsPlotCallback,
+    install_labeled_progress_bar,
     load_eval_state,
     save_eval_state,
 )
@@ -119,6 +125,30 @@ def compute_metrics(eval_pred):
     return {"accuracy": float(correct) / max(float(total), 1.0)}
 
 
+def estimated_optimizer_steps(
+    n_train: int,
+    batch_size: int,
+    grad_accum: int,
+    epochs: float,
+    max_steps: int,
+) -> int:
+    """Rough upper bound on global optimizer steps (single-process estimate)."""
+    if max_steps > 0:
+        return max_steps
+    micro_batch = max(1, batch_size * grad_accum)
+    steps_per_epoch = max(1, math.ceil(n_train / micro_batch))
+    return max(1, math.ceil(steps_per_epoch * epochs))
+
+
+def silence_known_third_party_warnings() -> None:
+    """bitsandbytes emits PyTorch FutureWarnings we cannot fix in this repo."""
+    warnings.filterwarnings(
+        "ignore",
+        message=r".*_check_is_size.*",
+        category=FutureWarning,
+    )
+
+
 def parse_args():
     p = argparse.ArgumentParser(description="LoRA SFT on distilled chat JSONL")
     p.add_argument("--data", type=str, default=str(DEFAULT_SFT_DATA), help="Merged SFT JSONL path")
@@ -132,6 +162,12 @@ def parse_args():
                    help="Steps between metrics CSV append + statistics.pdf refresh")
     p.add_argument("--save-every", type=int, default=500, help="Checkpoint save interval (steps)")
     p.add_argument("--logging-steps", type=int, default=10)
+    p.add_argument(
+        "--progress-desc",
+        type=str,
+        default=None,
+        help="Label on the HF/tqdm training bar (default: SFT · <output-dir name> · optimizer steps)",
+    )
     p.add_argument("--skip-acc-eval", action="store_true",
                    help="Loss-only statistics.pdf (no trainer.evaluate — faster)")
 
@@ -158,8 +194,33 @@ def parse_args():
     p.add_argument("--batch-size", type=int, default=1)
     p.add_argument("--grad-accum", type=int, default=8)
     p.add_argument("--lr", type=float, default=2e-4)
-    p.add_argument("--warmup-ratio", type=float, default=0.03)
-    p.add_argument("--max-seq-length", type=int, default=4096)
+    p.add_argument(
+        "--warmup-steps",
+        type=int,
+        default=None,
+        help="LR warmup in optimizer steps (default: derive from --warmup-ratio × estimated steps)",
+    )
+    p.add_argument(
+        "--warmup-ratio",
+        type=float,
+        default=0.03,
+        help="Used only when --warmup-steps is unset: fraction of estimated training steps",
+    )
+    p.add_argument("--max-seq-length", type=int, default=4096,
+                   help="Max sequence length passed to TRL as max_length (default: 4096)")
+    p.add_argument(
+        "--single-gpu",
+        action="store_true",
+        help="Load the full model on cuda:0 (first visible GPU) instead of device_map=\"auto\" "
+        "across all visible GPUs — avoids idle/high-VRAM imbalance from pipeline-style sharding.",
+    )
+    p.add_argument(
+        "--dataloader-workers",
+        type=int,
+        default=-1,
+        help="HF DataLoader worker processes (-1 = 4 under torchrun/LOCAL_RANK set, else 0). "
+        "Higher values prefetch batches on CPU so GPUs wait less (helps uneven DDP util).",
+    )
 
     p.set_defaults(qlora=True)
     return p.parse_args()
@@ -167,7 +228,12 @@ def parse_args():
 
 def main():
     args = parse_args()
+    silence_known_third_party_warnings()
     ensure_storage_dirs()
+
+    local_rank = int(os.environ.get("LOCAL_RANK", "-1"))
+    if local_rank >= 0:
+        torch.cuda.set_device(local_rank)
 
     data_path = Path(args.data).resolve()
     output_dir = Path(args.output_dir).resolve()
@@ -206,8 +272,11 @@ def main():
             ds, args.seed, args.eval_num_examples,
         )
         exclude_hashes = set(eval_hashes_list)
-        save_eval_state(eval_state_path, args.seed, len(eval_hashes_list), eval_hashes_list)
-        print(f"[init] train={len(train_ds)} eval={len(eval_ds)} (hashes saved → {eval_state_path})")
+        if local_rank <= 0:
+            save_eval_state(eval_state_path, args.seed, len(eval_hashes_list), eval_hashes_list)
+            print(f"[init] train={len(train_ds)} eval={len(eval_ds)} (hashes saved → {eval_state_path})")
+        else:
+            print(f"[init] train={len(train_ds)} eval={len(eval_ds)} (DDP rank {local_rank}; eval hashes from rank 0)")
 
     if len(eval_ds) == 0:
         raise RuntimeError("Eval dataset is empty — cannot compute plot metrics.")
@@ -222,6 +291,40 @@ def main():
         print("[warn] JSONL rows lack 'is_mcq'; MCQ/FRQ panels will be empty (merge.py adds this field).")
 
     lora_alpha = args.lora_alpha if args.lora_alpha is not None else 2 * args.lora_r
+
+    est_steps = estimated_optimizer_steps(
+        len(train_ds),
+        args.batch_size,
+        args.grad_accum,
+        args.epochs,
+        args.max_steps,
+    )
+    if args.warmup_steps is not None:
+        warmup_steps = max(0, args.warmup_steps)
+    else:
+        warmup_steps = max(0, int(round(est_steps * args.warmup_ratio)))
+    print(f"[train] estimated optimizer steps ≈ {est_steps}; warmup_steps={warmup_steps}")
+
+    dataloader_workers = int(args.dataloader_workers)
+    if dataloader_workers < 0:
+        dataloader_workers = 4 if local_rank >= 0 else 0
+    print(f"[train] dataloader_num_workers={dataloader_workers}")
+
+    if local_rank < 0 and torch.cuda.device_count() > 1 and not args.single_gpu:
+        print(
+            "[train] Multiple GPUs visible and device_map=\"auto\" will shard layers across them "
+            "(pipeline-style). That often shows ~one GPU at high SM util and others idle or holding weights only. "
+            "For balanced utilization use DDP: CUDA_VISIBLE_DEVICES=0,3 torchrun --standalone --nproc_per_node=2 "
+            "sft/train.py ...   or pin one GPU: CUDA_VISIBLE_DEVICES=3 python sft/train.py --single-gpu ..."
+        )
+
+    device_map: dict[str, int] | str
+    if local_rank >= 0:
+        device_map = {"": local_rank}
+    elif args.single_gpu:
+        device_map = {"": 0}
+    else:
+        device_map = "auto"
 
     tokenizer = AutoTokenizer.from_pretrained(args.model, trust_remote_code=True)
     tokenizer.pad_token = tokenizer.pad_token or tokenizer.eos_token
@@ -244,7 +347,7 @@ def main():
         model = AutoModelForCausalLM.from_pretrained(
             args.model,
             quantization_config=bnb_config,
-            device_map="auto",
+            device_map=device_map,
             trust_remote_code=True,
         )
         model = prepare_model_for_kbit_training(model)
@@ -254,7 +357,7 @@ def main():
         model = AutoModelForCausalLM.from_pretrained(
             args.model,
             torch_dtype=dtype,
-            device_map="auto",
+            device_map=device_map,
             trust_remote_code=True,
         )
         optim = "adamw_torch"
@@ -269,32 +372,39 @@ def main():
     )
     model = get_peft_model(model, peft_config)
 
-    training_args = SFTConfig(
+    use_cuda = torch.cuda.is_available()
+    sft_kw: dict = dict(
         output_dir=str(output_dir),
         seed=args.seed,
-        max_seq_length=args.max_seq_length,
+        max_length=args.max_seq_length,
         num_train_epochs=args.epochs,
         max_steps=args.max_steps if args.max_steps > 0 else -1,
         per_device_train_batch_size=args.batch_size,
         gradient_accumulation_steps=args.grad_accum,
         learning_rate=args.lr,
-        warmup_ratio=args.warmup_ratio,
+        warmup_steps=float(warmup_steps),
         logging_steps=args.logging_steps,
         save_steps=args.save_every,
         save_strategy="steps",
         eval_strategy="no",
-        bf16=torch.cuda.is_available(),
+        bf16=use_cuda,
         fp16=False,
         gradient_checkpointing=True,
         optim=optim,
         remove_unused_columns=False,
         report_to="none",
-        overwrite_output_dir=False,
-        preprocess_logits_for_metrics=preprocess_logits_for_metrics,
         save_total_limit=5,
         load_best_model_at_end=False,
         metric_for_best_model=None,
+        dataloader_num_workers=dataloader_workers,
+        dataloader_persistent_workers=dataloader_workers > 0,
+        dataloader_pin_memory=use_cuda,
+        # LoRA forward uses all trainable params; True adds a full backward-graph scan each step (DDP warning).
+        ddp_find_unused_parameters=False,
     )
+    if dataloader_workers > 0:
+        sft_kw["dataloader_prefetch_factor"] = 4
+    training_args = SFTConfig(**sft_kw)
 
     eval_builders = {
         "mcq": lambda: eval_mcq,
@@ -334,12 +444,21 @@ def main():
         train_dataset=train_ds,
         formatting_func=formatting_func,
         compute_metrics=compute_metrics,
+        preprocess_logits_for_metrics=preprocess_logits_for_metrics,
         callbacks=callbacks,
     )
     try:
         trainer = SFTTrainer(processing_class=tokenizer, **trainer_kw)
     except TypeError:
         trainer = SFTTrainer(tokenizer=tokenizer, **trainer_kw)
+
+    # HF CallbackHandler passes model/optimizer into callbacks but not ``trainer`` (see
+    # transformers CallbackHandler.call_event); our callbacks need the Trainer instance.
+    for cb in callbacks:
+        cb.trainer = trainer
+
+    progress_desc = args.progress_desc or f"SFT · {output_dir.name} · optimizer steps"
+    install_labeled_progress_bar(trainer, progress_desc)
 
     trainer.train(resume_from_checkpoint=resume_ckpt)
     trainer.save_model(str(output_dir))

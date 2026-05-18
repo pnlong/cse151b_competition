@@ -9,6 +9,8 @@ Multi-GPU behaviour:
   - Each shard writes full logs to ``<output-stem>.shard<K>.log`` (next to the CSV shards).
   - This driver prints a single periodic summary line on the terminal (CSV rows completed
     per shard vs quota), avoiding interleaved tqdm from multiple workers.
+  - Shard ``*.shardK.csv`` and ``*.shardK.log`` files are **not** deleted after merge
+    (kept for resume and debugging); only the merged ``--output`` CSV is written/updated.
 
 Examples:
     CUDA_VISIBLE_DEVICES=0,1,2 python inference/infer_parallel.py --gpu
@@ -38,8 +40,8 @@ from inference.utils import load_jsonl  # noqa: E402
 
 _INFER_SCRIPT = Path(__file__).resolve().parent / "infer.py"
 
-# Seconds between consolidated progress lines on the parent terminal (shard CSV row counts).
-_PROGRESS_INTERVAL_SEC = 12.0
+# Interval between consolidated progress lines on the parent terminal (shard CSV row counts).
+_PROGRESS_INTERVAL_SEC = 30 * 60  # 30 minutes
 
 # Flags whose values this driver strips from the forwarded argv and rewrites per worker.
 _STRIP_VALUE_FLAGS = frozenset({"--tp", "--num-shards", "--shard-id", "--output"})
@@ -105,11 +107,20 @@ def _shard_log_path(final: Path, shard_id: int) -> Path:
 
 
 def _csv_body_row_count(path: Path) -> int:
-    """Number of data rows in a submission CSV (excluding header)."""
+    """Number of logical data rows in a submission CSV (excluding header).
+
+    Must use the CSV parser: ``response`` cells often contain newlines, so counting
+    raw text lines massively over-counts (e.g. ``18097/447``).
+    """
     if not path.exists():
         return 0
     with open(path, encoding="utf-8", newline="") as f:
-        return max(0, sum(1 for _ in f) - 1)
+        reader = csv.reader(f)
+        try:
+            next(reader)  # header: id,response
+        except StopIteration:
+            return 0
+        return sum(1 for _ in reader)
 
 
 def _per_shard_quotas(data_path: Path, limit: int | None, num_shards: int) -> list[int]:
@@ -183,7 +194,7 @@ def _spawn_workers(
     for shard_id, phys in enumerate(devices):
         print(f"    shard {shard_id} (CUDA_VISIBLE_DEVICES={phys}): {_shard_log_path(final_output, shard_id)}")
     print(
-        f"[infer_parallel] consolidated progress every {_PROGRESS_INTERVAL_SEC:.0f}s "
+        f"[infer_parallel] consolidated progress every {_PROGRESS_INTERVAL_SEC / 60:.0f} min "
         f"(CSV rows done / questions in shard)",
         flush=True,
     )

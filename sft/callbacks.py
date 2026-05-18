@@ -13,12 +13,44 @@ import matplotlib
 
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt  # noqa: E402
+from tqdm.auto import tqdm
 from transformers import TrainerCallback, TrainerControl, TrainerState
+from transformers.trainer_callback import ProgressCallback
 from transformers.trainer_utils import PREFIX_CHECKPOINT_DIR
 
 
 METRICS_CSV_NAME = "metrics_history.csv"
 STATISTICS_PDF_NAME = "statistics.pdf"
+
+
+class LabeledProgressCallback(ProgressCallback):
+    """Same as HF ``ProgressCallback``, but sets tqdm ``desc`` and ``unit`` (default omits both)."""
+
+    def __init__(self, description: str, *, max_str_len: int = 100):
+        super().__init__(max_str_len=max_str_len)
+        self._progress_description = description
+
+    def on_train_begin(self, args, state, control, **kwargs):
+        if state.is_world_process_zero:
+            self.training_bar = tqdm(
+                total=state.max_steps,
+                dynamic_ncols=True,
+                desc=self._progress_description,
+                unit="step",
+            )
+        self.current_step = 0
+
+
+def install_labeled_progress_bar(trainer, description: str) -> None:
+    """Remove HF's default progress callback and append one with a tqdm label."""
+    trainer.pop_callback(ProgressCallback)
+    try:
+        from transformers.utils.notebook import NotebookProgressCallback
+
+        trainer.pop_callback(NotebookProgressCallback)
+    except ImportError:
+        pass
+    trainer.add_callback(LabeledProgressCallback(description))
 
 
 def _latest_train_loss(state: TrainerState) -> float | None:
@@ -56,6 +88,8 @@ class StatisticsPlotCallback(TrainerCallback):
         self.eval_builders = eval_builders
         self.metrics_csv_path = self.output_dir / metrics_csv_name
         self.pdf_path = self.output_dir / pdf_name
+        # Populated by train.py after SFTTrainer is constructed (HF omits trainer from kwargs).
+        self.trainer = None
 
     def _append_csv_row(self, row: dict[str, object]) -> None:
         self.output_dir.mkdir(parents=True, exist_ok=True)
@@ -92,14 +126,15 @@ class StatisticsPlotCallback(TrainerCallback):
         if step <= 0 or step % self.plot_every != 0:
             return
 
+        # Avoid duplicate full evals on every DDP rank (expensive and can deadlock I/O).
+        if not trainer.is_world_process_zero():
+            return
+
         acc_mcq = acc_frq = acc_overall = None
         if not self.skip_acc_eval:
             acc_mcq = self._run_eval_accuracy(trainer, "mcq")
             acc_frq = self._run_eval_accuracy(trainer, "frq")
             acc_overall = self._run_eval_accuracy(trainer, "overall")
-
-        if not trainer.is_world_process_zero():
-            return
 
         train_loss = _latest_train_loss(state)
         self._append_csv_row(
@@ -176,7 +211,9 @@ class StatisticsPlotCallback(TrainerCallback):
         plt.close(fig)
 
     def on_step_end(self, args, state: TrainerState, control: TrainerControl, **kwargs):
-        trainer = kwargs["trainer"]
+        trainer = self.trainer
+        if trainer is None:
+            return control
         self._maybe_plot(trainer, state)
         return control
 
@@ -193,6 +230,7 @@ class ReloadTrainDatasetCallback(TrainerCallback):
         super().__init__()
         self.reload_every = int(reload_every)
         self.rebuild_train_fn = rebuild_train_fn
+        self.trainer = None
 
     def on_step_end(self, args, state: TrainerState, control: TrainerControl, **kwargs):
         if self.reload_every <= 0:
@@ -200,7 +238,9 @@ class ReloadTrainDatasetCallback(TrainerCallback):
         step = int(state.global_step)
         if step <= 0 or step % self.reload_every != 0:
             return control
-        trainer = kwargs["trainer"]
+        trainer = self.trainer
+        if trainer is None:
+            return control
         new_ds = self.rebuild_train_fn(step)
         trainer.train_dataset = new_ds
         trainer._train_dataloader = None  # noqa: SLF001 — HF Trainer cache invalidation
@@ -215,9 +255,12 @@ class ReloadTrainDatasetEachEpochCallback(TrainerCallback):
     def __init__(self, rebuild_train_fn: Callable[[int], object]) -> None:
         super().__init__()
         self.rebuild_train_fn = rebuild_train_fn
+        self.trainer = None
 
     def on_epoch_begin(self, args, state: TrainerState, control: TrainerControl, **kwargs):
-        trainer = kwargs["trainer"]
+        trainer = self.trainer
+        if trainer is None:
+            return control
         new_ds = self.rebuild_train_fn(int(state.global_step))
         trainer.train_dataset = new_ds
         trainer._train_dataloader = None  # noqa: SLF001

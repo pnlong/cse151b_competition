@@ -217,23 +217,38 @@ Output: `STORAGE_DIR/distillation/sft_data.jsonl`
 
 ### 2c. LoRA SFT training
 
-Fine-tune Qwen3-4B on `sft_data.jsonl` using LoRA (QLoRA: 4-bit base + LoRA adapters). Saves checkpoint to `STORAGE_DIR/checkpoints/sft/`.
+Fine-tune Qwen3-4B on `sft_data.jsonl` using LoRA (QLoRA: 4-bit base + LoRA adapters). Checkpoints and plots go under `STORAGE_DIR/checkpoints/sft/` by default.
 
 **Relevant files**:
-- `sft/train.py` *(to be built)*
-- `constants.py` — model ID, system prompts
+- `sft/train.py` — `trl.SFTTrainer`, resume, `statistics.pdf`, optional JSONL reload
+- `sft/callbacks.py` — metrics CSV / plots / reload hooks
+- `constants.py` — default student model id
 - `config.py` — `DISTILL_DIR`, `CHECKPOINTS_DIR`
 
-**Planned configuration**: LoRA rank r=16–64, target modules `q_proj`, `v_proj` (and optionally `k_proj`, `o_proj`), trained with `trl.SFTTrainer`.
+**Single GPU vs multi-GPU**
 
-**How to run** *(command to be finalized once `sft/train.py` is built)*:
+| Mode | Command sketch | Notes |
+|------|------------------|--------|
+| **Single GPU** | `CUDA_VISIBLE_DEVICES=0 python sft/train.py ...` | Optional `--single-gpu` pins the full model on `cuda:0` if multiple GPUs are visible. |
+| **Multi-GPU (DDP)** | `CUDA_VISIBLE_DEVICES=0,1 torchrun --standalone --nproc_per_node=2 sft/train.py ...` | One full replica per GPU; global batch scales with world size. Prefer this over `python` with two GPUs visible (that uses `device_map="auto"` layer sharding and often poor SM balance). |
+
+Under `torchrun`, `train.py` defaults to **`--dataloader-workers 4`** (prefetch on CPU). If one GPU still shows lower utilization than the other, raise workers (e.g. `--dataloader-workers 8`) and/or **`--batch-size 2`** when VRAM allows — short dips also happen when rank 0 saves checkpoints (`--save-every`) or runs periodic eval for plots.
+
+**How to run** (adjust paths to your machine):
+
 ```bash
-CUDA_VISIBLE_DEVICES=0,1 python sft/train.py \
+# Single GPU
+CUDA_VISIBLE_DEVICES=0 python sft/train.py \
     --data /deepfreeze/pnlong/school/cse151b/final/distillation/sft_data.jsonl \
-    --output /deepfreeze/pnlong/school/cse151b/final/checkpoints/sft/
+    --output-dir /deepfreeze/pnlong/school/cse151b/final/checkpoints/sft/
+
+# Two GPUs (DDP)
+CUDA_VISIBLE_DEVICES=0,1 torchrun --standalone --nproc_per_node=2 sft/train.py \
+    --data /deepfreeze/pnlong/school/cse151b/final/distillation/sft_data.jsonl \
+    --output-dir /deepfreeze/pnlong/school/cse151b/final/checkpoints/sft/
 ```
 
-**What to report**: training loss curve, checkpoint saved at best validation loss.
+**What to report**: training loss curve (`statistics.pdf` / `metrics_history.csv`), checkpoint step, and note single-GPU vs `torchrun` configuration.
 
 ---
 
