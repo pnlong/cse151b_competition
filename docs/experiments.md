@@ -288,19 +288,31 @@ python inference/evaluate.py \
 Start from the SFT checkpoint. For each question, generate K responses and score them with `Judger.auto_judge()` (reward = 1 if correct, 0 if wrong; partial credit for multi-`[ANS]` questions based on fraction of sub-answers correct). A small format bonus rewards correctly producing `\boxed{}`. Update the policy via GRPO.
 
 **Relevant files**:
-- `rl/train.py` *(to be built)*
+- `rl/train.py` — CLI, `GRPOTrainer`, dataset building, best-reward callback
+- `rl/rewards.py` — Judger / `score_mcq` outcome reward + optional `\boxed{}` bonus
 - `judger.py` — reward function
 - `utils.py` — answer parsing helpers used by reward function
 - `constants.py` — model ID, answer format constants (`BOXED_CMD`, `ANS_PLACEHOLDER`)
 - `config.py` — `CHECKPOINTS_DIR`
 
-**How to run** *(command to be finalized once `rl/train.py` is built)*:
+**Dependencies**: use a recent **`trl`** build with `GRPOTrainer` (e.g. `trl>=0.14`; this repo is tested with TRL 1.x). TRL pulls in `transformers`; if import errors mention `AutoProcessor` / PIL, upgrade **`pillow`** (e.g. `pip install -U 'pillow>=10'`) so `PIL.Image.Resampling` exists. The judging stack needs **`antlr4-python3-runtime==4.11.1`** (already in `setup.sh`).
+
+**How to run**:
 ```bash
-CUDA_VISIBLE_DEVICES=0,1 python rl/train.py \
+# Single GPU (QLoRA continues SFT 4-bit adapter by default; add --no-qlora for bf16 LoRA)
+CUDA_VISIBLE_DEVICES=0 python rl/train.py \
+    --model /deepfreeze/pnlong/school/cse151b/final/checkpoints/sft \
+    --data data/public.jsonl \
+    --output /deepfreeze/pnlong/school/cse151b/final/checkpoints/rl/
+
+# Multi-GPU data parallel (recommended over one process + device_map=auto)
+CUDA_VISIBLE_DEVICES=0,1 accelerate launch --num_processes=2 rl/train.py \
     --model /deepfreeze/pnlong/school/cse151b/final/checkpoints/sft \
     --data data/public.jsonl \
     --output /deepfreeze/pnlong/school/cse151b/final/checkpoints/rl/
 ```
+
+Useful flags: `--num-generations K`, `--max-completion-length`, `--format-bonus` (default `0.02`, or `0` for pure outcome), `--no-qlora`, `--single-gpu`. Checkpoints: periodic saves under `--output`; best logged **`reward`** is mirrored to `checkpoint-best-reward/`.
 
 **What to report**: reward curve over training steps, checkpoint saved at peak reward.
 

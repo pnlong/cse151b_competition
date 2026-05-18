@@ -243,17 +243,27 @@ Compare accuracy to the Stage 1 baseline in `RESULTS_DIR/eval_log.csv` to confir
 
 **Goal**: further improve the SFT checkpoint using outcome-based reward on the public set ground truth. No labeled data needed beyond what we already have.
 
-**Script**: `rl/train.py` *(to be built)*
+**Script**: `rl/train.py` (reward logic in `rl/rewards.py`)
+
+**How to train** (needs recent **`trl`** with `GRPOTrainer`, compatible **`transformers`**, and **`pillow>=10`** if you see `AutoProcessor`/PIL errors):
+```bash
+CUDA_VISIBLE_DEVICES=0 python rl/train.py \
+    --model CHECKPOINTS_DIR/sft \
+    --data data/public.jsonl \
+    --output CHECKPOINTS_DIR/rl
+
+# Multi-GPU (prefer this over one process with device_map="auto" on all visible GPUs):
+CUDA_VISIBLE_DEVICES=0,1 accelerate launch --num_processes=2 rl/train.py \
+    --model CHECKPOINTS_DIR/sft \
+    --data data/public.jsonl \
+    --output CHECKPOINTS_DIR/rl
+```
 
 **What happens**:
-1. Start from the SFT checkpoint
-2. GRPO training loop on `public.jsonl`:
-   - Generate K responses per question
-   - Score each response with `Judger` (exact match = reward 1, wrong = 0)
-   - Partial credit for multi-`[ANS]`: reward = fraction of sub-answers correct
-   - Format bonus: small reward for correctly producing `\boxed{}`
-   - Update model via GRPO policy gradient
-3. Save checkpoint to `CHECKPOINTS_DIR/rl/`
+1. Start from the SFT LoRA directory (or a full model id): load base weights, attach adapter when `adapter_config.json` is present (QLoRA by default, `--no-qlora` for bf16).
+2. **`rl/train.py`** builds chat prompts from `public.jsonl` the same way as inference (`build_prompt` + `apply_chat_template_safe`). TRL **`GRPOTrainer`** samples **K** completions per prompt (`--num-generations`, default 4).
+3. **`rl/rewards.py`** scores each completion: MCQ via **`score_mcq`** (same as `inference/evaluate.py`); free-form via **`Judger.auto_judge`** for a single blank, or **mean per-slot `Judger.is_equal`** when the gold answer is a list of length > 1 (multi-`[ANS]` partial credit). Adds a small **`\boxed{}`** format bonus (`--format-bonus`, default `0.02`).
+4. Periodic saves under `--output`; whenever the logged aggregate **`reward`** improves, a copy is written to **`checkpoint-best-reward/`** (rank 0 only).
 
 **Key design note on answer equivalence**: The GRPO reward must use `Judger.auto_judge()` (not simple string match) so that equivalent forms like `-0.65` and `-13/20` both score as correct.
 
@@ -320,5 +330,5 @@ STORAGE_DIR/
 | Baseline inference pipeline | ✅ Built | `inference/infer.py`, `inference/evaluate.py` |
 | Distillation pipeline | ✅ Built | `distill/collect.py`, `distill/merge.py` |
 | SFT | ✅ Built | `sft/train.py` — LoRA/QLoRA, resume, `statistics.pdf`, optional dataset reload |
-| RL (GRPO) | 🔲 Not started | Need to build `rl/train.py` |
+| RL (GRPO) | ✅ Built | `rl/train.py`, `rl/rewards.py`; best `reward` → `checkpoint-best-reward/` |
 | Final submission | 🔲 Not started | Pending RL if used; SFT path ready |
