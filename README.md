@@ -1,6 +1,6 @@
 # CSE 151B Spring 2026 — Math Reasoning Competition
 
-Maximize the mathematical reasoning accuracy of **Qwen3-4B** on 893 private math problems spanning high school to graduate level. See `scratchpaper/directions.md` for the full competition spec and submission format.
+Maximize the mathematical reasoning accuracy of **Qwen3-4B** on 893 private math problems spanning high school to graduate level. See [`docs/directions.md`](docs/directions.md) for the full competition spec and submission format.
 
 **Environment**: `micromamba activate cse151b_competition`  (create once with `bash setup.sh`)
 
@@ -10,13 +10,13 @@ Maximize the mathematical reasoning accuracy of **Qwen3-4B** on 893 private math
 
 1. **Prompt engineering + self-consistency** ✓ built
 2. **Knowledge distillation** ✓ built — collect teacher traces → **SFT** ← *current stage*
-3. **Reinforcement learning (GRPO)** starting from the SFT checkpoint
+3. **Reinforcement learning (GRPO)** ✓ built — `rl/train.py` from SFT checkpoint
 
 ---
 
 ## Experiments
 
-See [`EXPERIMENTS.md`](EXPERIMENTS.md) for every experimental condition, the files it involves, exact reproduction commands, and results logged to `STORAGE_DIR/results/eval_log.csv`.
+See [`docs/experiments.md`](docs/experiments.md) for every experimental condition, the files it involves, exact reproduction commands, and results logged to `STORAGE_DIR/results/eval_log.csv`.
 
 | Experiment | Description | Status |
 |------------|-------------|--------|
@@ -26,7 +26,7 @@ See [`EXPERIMENTS.md`](EXPERIMENTS.md) for every experimental condition, the fil
 | 1d | Prompt routing, N=4 self-consistency | 🔲 to run |
 | 1e | Thinking mode off, N=4 self-consistency | 🔲 to run |
 | 2 | Knowledge distillation + SFT | ⚙ pipeline built, training not started |
-| 3 | Reinforcement learning (GRPO) | 🔲 not started |
+| 3 | Reinforcement learning (GRPO) | ⚙ pipeline built, training not started |
 
 ---
 
@@ -34,7 +34,9 @@ See [`EXPERIMENTS.md`](EXPERIMENTS.md) for every experimental condition, the fil
 
 ```
 final/
-├── EXPERIMENTS.md                All experimental conditions, run commands, and results log
+├── docs/
+│   ├── experiments.md            All experimental conditions, run commands, and results log
+│   └── pipeline.md               End-to-end pipeline (all stages)
 ├── topic_taxonomy.py             Shared 20-topic classifier (router + classify_topics)
 ├── constants.py                  Project-wide constants (model ID, sampling params, prompts)
 ├── config.py                     Loads .env → ROOT_DIR, STORAGE_DIR, all derived paths
@@ -66,11 +68,15 @@ final/
 │   ├── utils.py                  Distillation utilities (re-exports inference/utils + extras)
 │   └── README.md
 │
-├── scratchpaper/                 Git-ignored notes and planning documents
-│   ├── directions.md             Official competition spec (preserved from original README)
-│   ├── game_plan.md              Strategy overview and next steps
-│   ├── pipeline.md               End-to-end pipeline description for all stages
-│   └── project_rules.md          Coding conventions and project norms
+├── sft/                          Supervised fine-tuning (TRL SFTTrainer, LoRA/QLoRA)
+│   ├── train.py
+│   └── callbacks.py
+│
+├── rl/                           GRPO reinforcement learning (TRL GRPOTrainer)
+│   ├── train.py
+│   └── rewards.py                Judger / MCQ outcome rewards
+│
+├── scratchpaper/                 Git-ignored notes (optional LaTeX, guides); canonical pipeline → `docs/pipeline.md`
 │
 ├── setup.sh                      One-time environment setup (micromamba + pip deps)
 ├── .env                          Local directory paths (git-ignored)

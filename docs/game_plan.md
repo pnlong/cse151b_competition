@@ -92,9 +92,9 @@ Start from the SFT checkpoint.
 - [ ] Establish eval loop: SFT checkpoint → `inference/infer.py` → `inference/evaluate.py`
 
 ### Longer term — RL
-- [ ] GRPO training starting from the SFT checkpoint
-- [ ] Implement answer equivalence logic for reward computation using `Judger`
-- [ ] Partial-credit reward for multi-`[ANS]` questions
+- [ ] Run GRPO training from the SFT checkpoint (`rl/train.py`)
+- [x] Reward uses `Judger` / `score_mcq` for equivalence (`rl/rewards.py`)
+- [x] Partial-credit for multi-`[ANS]` (`rl/rewards.py`)
 
 ---
 

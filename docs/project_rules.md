@@ -47,9 +47,9 @@ final/                        ← repo root
 │   └── private.jsonl
 │
 ├── inference/                ← baseline inference pipeline
-├── distill/                  ← distillation data collection (to be built)
-├── sft/                      ← supervised fine-tuning (to be built)
-├── rl/                       ← reinforcement learning (to be built)
+├── distill/                  ← distillation data collection
+├── sft/                      ← supervised fine-tuning
+├── rl/                       ← reinforcement learning (GRPO)
 └── scratchpaper/             ← markdown notes, git-ignored
 ```
 
