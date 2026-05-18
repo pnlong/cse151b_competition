@@ -6,6 +6,10 @@ GPU device selection is controlled entirely via CUDA_VISIBLE_DEVICES (set
 externally before running). Pass --gpu to enable GPU inference; omit it to
 run on CPU (not recommended for production, but useful for import checks).
 
+When launched by ``inference/infer_parallel.py``, workers get the environment
+variable ``INFER_PARALLEL_WORKER=1`` so tqdm is disabled and verbose logs can be
+captured cleanly in per-shard ``*.shardK.log`` files.
+
 Run on private test set (submission):
     CUDA_VISIBLE_DEVICES=0 python inference/infer.py --gpu
 
@@ -17,6 +21,10 @@ Quick smoke-test (1 sample, 20 questions, CPU-only):
 
 Multi-GPU tensor parallel (2 GPUs):
     CUDA_VISIBLE_DEVICES=0,1 python inference/infer.py --gpu --tp 2
+
+Multi-GPU data parallel (throughput — one full model copy per GPU):
+    python inference/infer_parallel.py --gpu
+    CUDA_VISIBLE_DEVICES=0,1 python inference/infer_parallel.py --gpu --output results/sub.csv
 """
 
 import argparse
@@ -104,6 +112,12 @@ def parse_args():
                    help="Ignore existing output and reprocess all questions from scratch")
     p.add_argument("--limit",       type=int,   default=None,
                    help="Process only the first N questions (smoke-testing)")
+    p.add_argument("--num-shards", type=int, default=1,
+                   help="Split the (possibly --limit-truncated) dataset into this many "
+                        "index-based shards; only rows with index %% num-shards == shard-id "
+                        "are processed (default: 1 = full dataset).")
+    p.add_argument("--shard-id",   type=int, default=0,
+                   help="Which shard to run [0, num-shards); used with --num-shards (default: 0).")
 
     # ── Prompt routing ────────────────────────────────────────────────────────
     p.add_argument("--use-router", action="store_true",
@@ -115,7 +129,15 @@ def parse_args():
                    help="Router model for --router-secondary-llm (default: Qwen2.5-0.5B-Instruct).")
     p.add_argument("--router-device", default="cpu", choices=["cpu", "auto"],
                    help="Device for router model: cpu (safe) or auto (uses available accelerators).")
-    return p.parse_args()
+    args = p.parse_args()
+    if args.num_shards < 1:
+        p.error("--num-shards must be >= 1")
+    if not (0 <= args.shard_id < args.num_shards):
+        p.error("--shard-id must satisfy 0 <= shard-id < num-shards")
+    if args.num_shards > 1 and args.tp != 1:
+        p.error("With --num-shards > 1, use --tp 1 (one GPU per shard process). "
+                "Use inference/infer_parallel.py for multi-GPU throughput.")
+    return args
 
 
 # ── Helpers ────────────────────────────────────────────────────────────────────
@@ -143,6 +165,11 @@ def append_rows(rows: list[dict], out_path: Path, write_header: bool) -> None:
 
 def main():
     args = parse_args()
+    # When infer_parallel.py runs workers, it sets INFER_PARALLEL_WORKER=1 so tqdm/log
+    # output is plain print (full logs go to per-shard *.log files).
+    _parallel_worker = os.environ.get("INFER_PARALLEL_WORKER", "").lower() in (
+        "1", "true", "yes",
+    )
     # When --gpu IS set, CUDA_VISIBLE_DEVICES must be set externally by the caller.
 
     gpu_util = args.gpu_util if args.gpu_util is not None else (
@@ -155,6 +182,11 @@ def main():
     data = load_jsonl(Path(args.data))
     if args.limit:
         data = data[: args.limit]
+    if args.num_shards > 1:
+        data = [
+            item for idx, item in enumerate(data)
+            if idx % args.num_shards == args.shard_id
+        ]
 
     done_ids = set() if args.reset else load_done_ids(out_path)
     todo     = [item for item in data if str(item["id"]) not in done_ids]
@@ -167,6 +199,9 @@ def main():
     print(f"  Model  : {args.model}")
     device_str = f"GPU (tp={args.tp}, gpu_util={gpu_util:.0%}" + (", INT8 quantized" if args.quantize else "") + ")" if args.gpu else "CPU"
     print(f"  Device : {device_str}")
+    if args.num_shards > 1:
+        print(f"  Shard    : {args.shard_id + 1}/{args.num_shards} "
+              f"(rows where dataset_index % {args.num_shards} == {args.shard_id})")
     print(f"  Questions: {len(data)} total  ({n_mcq} MCQ, {n_free} free-form)")
     print(f"  Samples  : {N} per question  →  {len(data) * N} total generations")
     print(f"{'='*55}\n")
@@ -247,7 +282,7 @@ def main():
     need_header   = args.reset or not out_path.exists()
     total_written = len(done_ids)
 
-    pbar   = tqdm(total=len(todo), desc="Questions", unit="q", initial=0)
+    pbar   = tqdm(total=len(todo), desc="Questions", unit="q", initial=0, disable=_parallel_worker)
     chunks = range(0, len(todo), args.chunk_size)
     for chunk_start in chunks:
         chunk = todo[chunk_start : chunk_start + args.chunk_size]
@@ -304,7 +339,13 @@ def main():
         need_header    = False
         total_written += len(rows)
         pbar.update(len(rows))
-        tqdm.write(f"  wrote {len(rows)} rows  (total {total_written}/{len(data)})  →  {out_path}")
+        chunk_msg = (
+            f"  wrote {len(rows)} rows  (total {total_written}/{len(data)})  →  {out_path}"
+        )
+        if _parallel_worker:
+            print(chunk_msg, flush=True)
+        else:
+            tqdm.write(chunk_msg)
 
     pbar.close()
     print(f"\nDone. {total_written}/{len(data)} questions written to {out_path}")

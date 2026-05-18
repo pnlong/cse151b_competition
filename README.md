@@ -91,13 +91,16 @@ cp .env.example .env    # fill in ROOT_DIR and STORAGE_DIR
 # 2. Create environment (first time only)
 bash setup.sh
 
-# 3. Activate environment
+# 3. Activate environment (required — use this shell for all Python commands)
 micromamba activate cse151b_competition
 
-# 3. Run inference on the private test set (submission)
+# If you already had an older env and only need SFT training deps:
+#   pip install trl peft datasets matplotlib
+
+# 4. Run inference on the private test set (submission)
 CUDA_VISIBLE_DEVICES=0 python inference/infer.py --gpu
 
-# 4. Run on public set and evaluate locally
+# 5. Run on public set and evaluate locally
 CUDA_VISIBLE_DEVICES=0 python inference/infer.py --gpu \
     --data data/public.jsonl --output results/public.csv
 python inference/evaluate.py --results results/public.csv

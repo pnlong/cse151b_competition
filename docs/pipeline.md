@@ -147,29 +147,9 @@ CUDA_VISIBLE_DEVICES=0 python distill/collect.py --gpu --gpu-util 0.90 --model d
 # Qwen3-8B ✅
 CUDA_VISIBLE_DEVICES=0 python distill/collect.py --gpu --gpu-util 0.90 --model Qwen/Qwen3-8B
 
-# DeepSeek-R1-Distill-Qwen-14B — fits on single 10 GB GPU
-CUDA_VISIBLE_DEVICES=0,1 python distill/collect.py --gpu --tp 2 --quantize \
+# DeepSeek-R1-Distill-Qwen-14B ✅
+CUDA_VISIBLE_DEVICES=0,1 python distill/collect.py --gpu --tp 2 \
     --model deepseek-ai/DeepSeek-R1-Distill-Qwen-14B
-
-# DeepSeek-R1-Distill-Qwen-32B — best reasoning traces, needs both GPUs (~32 GB INT8)
-CUDA_VISIBLE_DEVICES=0,1 python distill/collect.py --gpu --tp 2 --quantize \
-    --model deepseek-ai/DeepSeek-R1-Distill-Qwen-32B
-
-# Qwen3-32B — same family as student, strong reasoning, needs both GPUs
-CUDA_VISIBLE_DEVICES=0,1 python distill/collect.py --gpu --tp 2 --quantize \
-    --model Qwen/Qwen3-32B
-
-# Phi-4 — 14B, needs both GPUs on 10 GB cards (~14 GB INT8)
-CUDA_VISIBLE_DEVICES=0,1 python distill/collect.py --gpu --tp 2 --quantize \
-    --model microsoft/phi-4
-
-# Llama-3.3-70B — diverse trace style, needs both GPUs (~70 GB INT8)
-CUDA_VISIBLE_DEVICES=0,1 python distill/collect.py --gpu --tp 2 --quantize \
-    --model meta-llama/Llama-3.3-70B-Instruct
-
-# Qwen2.5-Math-72B — math specialist, needs both GPUs
-CUDA_VISIBLE_DEVICES=0,1 python distill/collect.py --gpu --tp 2 --quantize \
-    --model Qwen/Qwen2.5-Math-72B-Instruct
 ```
 
 Each run saves to `DISTILL_DIR/{model-slug}/`:
@@ -210,12 +190,10 @@ python distill/merge.py --no-private # exclude private traces if needed
 
 Output: `DISTILL_DIR/sft_data.jsonl` — chat-format records:
 ```json
-{"messages": [
-  {"role": "system",    "content": "...DISTILL_SYSTEM_MATH..."},
-  {"role": "user",      "content": "question text"},
-  {"role": "assistant", "content": "full trace ending in \\boxed{answer}"}
-]}
+{"messages": [...], "is_mcq": false}
 ```
+
+(`is_mcq` is `true` when the source trace had MCQ `options`; used by `sft/train.py` for stratified eval plots.)
 
 ---
 
@@ -223,7 +201,23 @@ Output: `DISTILL_DIR/sft_data.jsonl` — chat-format records:
 
 **Goal**: fine-tune Qwen3-4B on the distilled traces so it learns to produce similarly thorough, structured reasoning.
 
-**Script**: `sft/train.py` *(to be built)*
+**Script**: `sft/train.py`
+
+**Dependencies** (install **only** into `cse151b_competition`; `bash setup.sh` already does this via `micromamba run -n cse151b_competition pip …`):
+
+```bash
+micromamba activate cse151b_competition
+pip install trl peft datasets matplotlib
+```
+
+**Example train** (from repo root, env activated):
+
+```bash
+CUDA_VISIBLE_DEVICES=0 python sft/train.py \
+    --reload-data-every 1000   # optional: pick up newly merged sft_data.jsonl while distill runs
+```
+
+Artifacts under `CHECKPOINTS_DIR/sft/`: adapter checkpoints, `statistics.pdf` (loss + MCQ/FRQ/overall token accuracy on the fixed eval shard), `metrics_history.csv`, `sft_eval_state.json` (eval split — required for `--resume`).
 
 **What happens**:
 1. Load `DISTILL_DIR/sft_data.jsonl`
@@ -325,6 +319,6 @@ STORAGE_DIR/
 |-------|--------|-------|
 | Baseline inference pipeline | ✅ Built | `inference/infer.py`, `inference/evaluate.py` |
 | Distillation pipeline | ✅ Built | `distill/collect.py`, `distill/merge.py` |
-| SFT | 🔲 Not started | Need to build `sft/train.py` |
+| SFT | ✅ Built | `sft/train.py` — LoRA/QLoRA, resume, `statistics.pdf`, optional dataset reload |
 | RL (GRPO) | 🔲 Not started | Need to build `rl/train.py` |
-| Final submission | 🔲 Not started | Pending SFT + RL |
+| Final submission | 🔲 Not started | Pending RL if used; SFT path ready |

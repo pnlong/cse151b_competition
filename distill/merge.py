@@ -6,6 +6,9 @@ Scans DISTILL_DIR for all {model}/public_traces.jsonl and (optionally)
 {model}/private_traces.jsonl, converts each trace to the standard chat
 format used by trl / transformers SFT trainers, shuffles, and saves.
 
+Each JSON line includes ``is_mcq`` (whether the trace had MCQ ``options``)
+for stratified SFT metrics in ``sft/train.py``.
+
 Include private traces (default, controlled by INCLUDE_PRIVATE_IN_SFT):
     python distill/merge.py
 
@@ -59,7 +62,9 @@ def to_sft_record(trace: dict) -> dict:
             {"role": "system",    "content": system},
             {"role": "user",      "content": user},
             {"role": "assistant", "content": trace["response"]},
-        ]
+        ],
+        # Used by sft/train.py for stratified eval plots (MCQ vs free-response).
+        "is_mcq": bool(trace.get("options")),
     }
 
 
