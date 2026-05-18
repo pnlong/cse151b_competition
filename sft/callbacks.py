@@ -21,28 +21,142 @@ from transformers.trainer_utils import PREFIX_CHECKPOINT_DIR
 
 METRICS_CSV_NAME = "metrics_history.csv"
 STATISTICS_PDF_NAME = "statistics.pdf"
+"""Symlink name updated on every checkpoint save (directory symlink → ``checkpoint-{step}``)."""
+CHECKPOINT_LATEST = "checkpoint-latest"
 
 
-class LabeledProgressCallback(ProgressCallback):
-    """Same as HF ``ProgressCallback``, but sets tqdm ``desc`` and ``unit`` (default omits both)."""
+class CheckpointChunkProgressCallback(TrainerCallback):
+    """
+    tqdm segments of ``save_steps`` optimizer steps (checkpoint cadence), restarting the bar each segment.
+    Last segment may be shorter. Loss / token accuracy only as postfix (no dict spam).
+    Total optimizer steps are logged once at train start; the bar title stays short (segment id + global step range).
+    """
 
-    def __init__(self, description: str, *, max_str_len: int = 100):
-        super().__init__(max_str_len=max_str_len)
-        self._progress_description = description
+    def __init__(self) -> None:
+        super().__init__()
+        self.bar = None
+        self._cur_seg_start: int | None = None
+        self._printed_step_banner = False
+
+    @staticmethod
+    def _num_chunks(max_steps: int, chunk: int) -> int:
+        chunk = max(1, chunk)
+        ms = max(0, max_steps)
+        return max(1, (ms + chunk - 1) // chunk)
+
+    @staticmethod
+    def _chunk_index_one_based(gs: int, chunk: int) -> int:
+        chunk = max(1, chunk)
+        return (max(gs, 1) - 1) // chunk + 1
 
     def on_train_begin(self, args, state, control, **kwargs):
+        self.bar = None
+        self._cur_seg_start = None
+        self._printed_step_banner = False
         if state.is_world_process_zero:
-            self.training_bar = tqdm(
-                total=state.max_steps,
-                dynamic_ncols=True,
-                desc=self._progress_description,
-                unit="step",
+            chunk = int(args.save_steps) if getattr(args, "save_steps", None) else 500
+            chunk = max(1, chunk)
+            max_steps = int(state.max_steps or 0)
+            if max_steps > 0:
+                n_chunks = self._num_chunks(max_steps, chunk)
+                print(
+                    f"[progress] total optimizer steps={max_steps}; "
+                    f"{n_chunks} tqdm segments (up to {chunk} steps each, aligned to checkpoint cadence)",
+                )
+                self._printed_step_banner = True
+        return control
+
+    def _segment_bounds(self, gs: int, max_steps: int, chunk: int) -> tuple[int, int, int]:
+        chunk = max(1, chunk)
+        seg_start = ((max(gs, 1) - 1) // chunk) * chunk + 1
+        seg_end = min(seg_start + chunk - 1, max_steps)
+        seg_total = seg_end - seg_start + 1
+        return seg_start, seg_end, seg_total
+
+    def on_step_end(self, args, state: TrainerState, control: TrainerControl, **kwargs):
+        if not state.is_world_process_zero:
+            return control
+        gs = int(state.global_step)
+        max_steps = int(state.max_steps)
+        chunk = int(args.save_steps) if getattr(args, "save_steps", None) else 500
+        chunk = max(1, chunk)
+        seg_start, seg_end, seg_total = self._segment_bounds(gs, max_steps, chunk)
+        pos_done = min(gs - seg_start + 1, seg_total)
+        total_chunks = self._num_chunks(max_steps, chunk)
+        chunk_i = self._chunk_index_one_based(gs, chunk)
+
+        if not self._printed_step_banner and max_steps > 0:
+            print(
+                f"[progress] total optimizer steps={max_steps}; "
+                f"{total_chunks} tqdm segments (up to {chunk} steps each, aligned to checkpoint cadence)",
             )
-        self.current_step = 0
+            self._printed_step_banner = True
+
+        if self.bar is None or seg_start != self._cur_seg_start:
+            if self.bar is not None:
+                self.bar.close()
+            self._cur_seg_start = seg_start
+            self.bar = tqdm(
+                total=seg_total,
+                initial=min(pos_done, seg_total),
+                dynamic_ncols=True,
+                unit="step",
+                desc=f"Training [{chunk_i}/{total_chunks}] {seg_start}-{seg_end}",
+            )
+        else:
+            self.bar.update(1)
+
+        return control
+
+    def on_log(self, args, state: TrainerState, control: TrainerControl, logs=None, **kwargs):
+        if (
+            not state.is_world_process_zero
+            or self.bar is None
+            or logs is None
+        ):
+            return control
+        loss = logs.get("loss")
+        mta = logs.get("mean_token_accuracy")
+        parts: list[str] = []
+        if loss is not None:
+            parts.append(f"loss={float(loss):.4g}")
+        if mta is not None:
+            parts.append(f"mean_tok_acc={float(mta):.4g}")
+        if parts:
+            self.bar.set_postfix_str(", ".join(parts))
+        return control
+
+    def on_train_end(self, args, state: TrainerState, control: TrainerControl, **kwargs):
+        if state.is_world_process_zero and self.bar is not None:
+            self.bar.close()
+            self.bar = None
+            self._cur_seg_start = None
+        return control
 
 
-def install_labeled_progress_bar(trainer, description: str) -> None:
-    """Remove HF's default progress callback and append one with a tqdm label."""
+class LatestCheckpointSymlinkCallback(TrainerCallback):
+    """Keeps ``checkpoint-latest`` → newest numeric ``checkpoint-{step}`` (rank 0 only)."""
+
+    def on_save(self, args, state: TrainerState, control: TrainerControl, **kwargs):
+        if not state.is_world_process_zero:
+            return control
+        run_dir = Path(args.output_dir)
+        step = int(state.global_step)
+        target_name = f"{PREFIX_CHECKPOINT_DIR}-{step}"
+        target = run_dir / target_name
+        link = run_dir / CHECKPOINT_LATEST
+        if not target.is_dir():
+            return control
+        try:
+            link.unlink(missing_ok=True)
+            link.symlink_to(target_name, target_is_directory=True)
+        except OSError:
+            pass
+        return control
+
+
+def install_checkpoint_chunk_progress_bar(trainer) -> None:
+    """Swap HF's tqdm callback for checkpoint-aligned chunk progress."""
     trainer.pop_callback(ProgressCallback)
     try:
         from transformers.utils.notebook import NotebookProgressCallback
@@ -50,7 +164,7 @@ def install_labeled_progress_bar(trainer, description: str) -> None:
         trainer.pop_callback(NotebookProgressCallback)
     except ImportError:
         pass
-    trainer.add_callback(LabeledProgressCallback(description))
+    trainer.add_callback(CheckpointChunkProgressCallback())
 
 
 def _latest_train_loss(state: TrainerState) -> float | None:
@@ -68,7 +182,8 @@ class StatisticsPlotCallback(TrainerCallback):
     Every ``plot_every`` steps: append metrics_history.csv and regenerate statistics.pdf.
 
     Train loss comes from trainer.state.log_history. Stratified accuracies come from
-    trainer.evaluate(...) on MCQ / FRQ / full eval subsets (masked token accuracy).
+    ``trainer.evaluate`` on MCQ / FRQ / overall subsets (masked token accuracy); those subsets must be
+    tokenized via ``SFTTrainer(eval_dataset={...})``.
     """
 
     def __init__(
@@ -77,7 +192,6 @@ class StatisticsPlotCallback(TrainerCallback):
         output_dir: Path,
         plot_every: int,
         skip_acc_eval: bool,
-        eval_builders: dict[str, Callable[[], object]],
         metrics_csv_name: str = METRICS_CSV_NAME,
         pdf_name: str = STATISTICS_PDF_NAME,
     ) -> None:
@@ -85,7 +199,6 @@ class StatisticsPlotCallback(TrainerCallback):
         self.output_dir = Path(output_dir)
         self.plot_every = max(1, int(plot_every))
         self.skip_acc_eval = skip_acc_eval
-        self.eval_builders = eval_builders
         self.metrics_csv_path = self.output_dir / metrics_csv_name
         self.pdf_path = self.output_dir / pdf_name
         # Populated by train.py after SFTTrainer is constructed (HF omits trainer from kwargs).
@@ -108,9 +221,10 @@ class StatisticsPlotCallback(TrainerCallback):
             w.writerow(row)
 
     def _run_eval_accuracy(self, trainer, key: str) -> float | None:
-        if key not in self.eval_builders:
+        eds = getattr(trainer, "eval_dataset", None)
+        if not isinstance(eds, dict) or key not in eds:
             return None
-        ds = self.eval_builders[key]()
+        ds = eds[key]
         if ds is None or len(ds) == 0:
             return None
         metrics = trainer.evaluate(eval_dataset=ds, metric_key_prefix=f"{key}_")
@@ -242,6 +356,16 @@ class ReloadTrainDatasetCallback(TrainerCallback):
         if trainer is None:
             return control
         new_ds = self.rebuild_train_fn(step)
+        fmt = getattr(trainer, "_sft_formatting_func", None)
+        if hasattr(trainer, "_prepare_dataset"):
+            new_ds = trainer._prepare_dataset(
+                new_ds,
+                trainer.processing_class,
+                trainer.args,
+                trainer.args.packing,
+                fmt,
+                "train",
+            )
         trainer.train_dataset = new_ds
         trainer._train_dataloader = None  # noqa: SLF001 — HF Trainer cache invalidation
         if getattr(trainer, "sampler", None) is not None:
@@ -262,6 +386,16 @@ class ReloadTrainDatasetEachEpochCallback(TrainerCallback):
         if trainer is None:
             return control
         new_ds = self.rebuild_train_fn(int(state.global_step))
+        fmt = getattr(trainer, "_sft_formatting_func", None)
+        if hasattr(trainer, "_prepare_dataset"):
+            new_ds = trainer._prepare_dataset(
+                new_ds,
+                trainer.processing_class,
+                trainer.args,
+                trainer.args.packing,
+                fmt,
+                "train",
+            )
         trainer.train_dataset = new_ds
         trainer._train_dataloader = None  # noqa: SLF001
         return control

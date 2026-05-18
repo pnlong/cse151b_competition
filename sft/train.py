@@ -9,6 +9,7 @@ Features:
   - Multi-GPU: prefer ``torchrun --nproc_per_node=N ...`` (DDP, full replica per GPU). A single
     process with ``device_map="auto"`` splits layers across GPUs and often shows poor SM balance.
     Use ``--single-gpu`` to pin the whole model to the first visible GPU when one GPU is enough.
+  - Output dirs contain ``checkpoint-{step}/`` and ``checkpoint-latest`` (symlink to newest checkpoint folder).
 
 HF cache: mirrors inference scripts — set HF_HOME before heavy imports.
 """
@@ -47,10 +48,11 @@ from trl import SFTConfig, SFTTrainer  # noqa: E402
 from constants import DEFAULT_MODEL  # noqa: E402
 from config import CHECKPOINTS_DIR, DISTILL_DIR, ensure_storage_dirs  # noqa: E402
 from sft.callbacks import (  # noqa: E402
+    LatestCheckpointSymlinkCallback,
     ReloadTrainDatasetCallback,
     ReloadTrainDatasetEachEpochCallback,
     StatisticsPlotCallback,
-    install_labeled_progress_bar,
+    install_checkpoint_chunk_progress_bar,
     load_eval_state,
     save_eval_state,
 )
@@ -131,12 +133,16 @@ def estimated_optimizer_steps(
     grad_accum: int,
     epochs: float,
     max_steps: int,
+    *,
+    world_size: int = 1,
 ) -> int:
-    """Rough upper bound on global optimizer steps (single-process estimate)."""
+    """Rough optimizer-step count for the scheduled run (matches HF tqdm total under DDP)."""
     if max_steps > 0:
         return max_steps
-    micro_batch = max(1, batch_size * grad_accum)
-    steps_per_epoch = max(1, math.ceil(n_train / micro_batch))
+    ws = max(1, int(world_size))
+    # Per global optimizer step, all ranks each process (batch_size * grad_accum) examples from disjoint shards.
+    examples_per_global_step = max(1, batch_size * grad_accum * ws)
+    steps_per_epoch = max(1, math.ceil(n_train / examples_per_global_step))
     return max(1, math.ceil(steps_per_epoch * epochs))
 
 
@@ -156,18 +162,12 @@ def parse_args():
     p.add_argument("--model", type=str, default=DEFAULT_MODEL)
     p.add_argument("--seed", type=int, default=42)
 
-    p.add_argument("--eval-num-examples", type=int, default=256,
+    p.add_argument("--eval-num-examples", type=int, default=32,
                    help="Examples held out for stratified eval plots (stable across reloads via hashes)")
-    p.add_argument("--plot-every", type=int, default=500,
+    p.add_argument("--plot-every", type=int, default=250,
                    help="Steps between metrics CSV append + statistics.pdf refresh")
-    p.add_argument("--save-every", type=int, default=500, help="Checkpoint save interval (steps)")
+    p.add_argument("--save-every", type=int, default=250, help="Checkpoint save interval (steps)")
     p.add_argument("--logging-steps", type=int, default=10)
-    p.add_argument(
-        "--progress-desc",
-        type=str,
-        default=None,
-        help="Label on the HF/tqdm training bar (default: SFT · <output-dir name> · optimizer steps)",
-    )
     p.add_argument("--skip-acc-eval", action="store_true",
                    help="Loss-only statistics.pdf (no trainer.evaluate — faster)")
 
@@ -188,7 +188,7 @@ def parse_args():
                    help="Default: 2 * lora-r")
     p.add_argument("--lora-dropout", type=float, default=0.05)
 
-    p.add_argument("--epochs", type=float, default=1.0)
+    p.add_argument("--epochs", type=float, default=5.0)
     p.add_argument("--max-steps", type=int, default=-1,
                    help="If > 0, overrides epoch-based training length")
     p.add_argument("--batch-size", type=int, default=1)
@@ -274,9 +274,12 @@ def main():
         exclude_hashes = set(eval_hashes_list)
         if local_rank <= 0:
             save_eval_state(eval_state_path, args.seed, len(eval_hashes_list), eval_hashes_list)
-            print(f"[init] train={len(train_ds)} eval={len(eval_ds)} (hashes saved → {eval_state_path})")
+            print(f"[init] train examples={len(train_ds)} eval examples={len(eval_ds)} (hashes saved → {eval_state_path})")
         else:
-            print(f"[init] train={len(train_ds)} eval={len(eval_ds)} (DDP rank {local_rank}; eval hashes from rank 0)")
+            print(
+                f"[init] train examples={len(train_ds)} eval examples={len(eval_ds)} "
+                f"(DDP rank {local_rank}; eval hashes from rank 0)",
+            )
 
     if len(eval_ds) == 0:
         raise RuntimeError("Eval dataset is empty — cannot compute plot metrics.")
@@ -292,18 +295,29 @@ def main():
 
     lora_alpha = args.lora_alpha if args.lora_alpha is not None else 2 * args.lora_r
 
+    world_size = int(os.environ.get("WORLD_SIZE", "1"))
+    if local_rank < 0:
+        world_size = 1
+
     est_steps = estimated_optimizer_steps(
         len(train_ds),
         args.batch_size,
         args.grad_accum,
         args.epochs,
         args.max_steps,
+        world_size=world_size,
     )
     if args.warmup_steps is not None:
         warmup_steps = max(0, args.warmup_steps)
     else:
         warmup_steps = max(0, int(round(est_steps * args.warmup_ratio)))
-    print(f"[train] estimated optimizer steps ≈ {est_steps}; warmup_steps={warmup_steps}")
+    ex_per_step = max(1, args.batch_size * args.grad_accum * max(1, world_size))
+    print(
+        f"[train] train examples={len(train_ds)} | "
+        f"≈{ex_per_step} examples per global optimizer step "
+        f"(world_size={max(1, world_size)} × batch × grad_accum) | "
+        f"estimated optimizer steps ≈ {est_steps}; warmup_steps={warmup_steps}",
+    )
 
     dataloader_workers = int(args.dataloader_workers)
     if dataloader_workers < 0:
@@ -406,19 +420,13 @@ def main():
         sft_kw["dataloader_prefetch_factor"] = 4
     training_args = SFTConfig(**sft_kw)
 
-    eval_builders = {
-        "mcq": lambda: eval_mcq,
-        "frq": lambda: eval_frq,
-        "overall": lambda: eval_ds,
-    }
-
     callbacks = [
         StatisticsPlotCallback(
             output_dir=output_dir,
             plot_every=args.plot_every,
             skip_acc_eval=args.skip_acc_eval,
-            eval_builders=eval_builders,
         ),
+        LatestCheckpointSymlinkCallback(),
     ]
 
     base_seed = args.seed
@@ -442,6 +450,7 @@ def main():
         model=model,
         args=training_args,
         train_dataset=train_ds,
+        eval_dataset={"mcq": eval_mcq, "frq": eval_frq, "overall": eval_ds},
         formatting_func=formatting_func,
         compute_metrics=compute_metrics,
         preprocess_logits_for_metrics=preprocess_logits_for_metrics,
@@ -457,8 +466,9 @@ def main():
     for cb in callbacks:
         cb.trainer = trainer
 
-    progress_desc = args.progress_desc or f"SFT · {output_dir.name} · optimizer steps"
-    install_labeled_progress_bar(trainer, progress_desc)
+    trainer._sft_formatting_func = formatting_func  # noqa: SLF001 — reload callbacks + disk reload tokenization
+
+    install_checkpoint_chunk_progress_bar(trainer)
 
     trainer.train(resume_from_checkpoint=resume_ckpt)
     trainer.save_model(str(output_dir))
