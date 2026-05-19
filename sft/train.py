@@ -4,12 +4,16 @@ LoRA / QLoRA supervised fine-tuning on distilled chat JSONL (trl.SFTTrainer).
 
 Features:
   - Resume from checkpoint (--resume / --resume-from)
-  - metrics_history.csv + statistics.pdf (loss + MCQ/FRQ/overall token accuracy on eval shard)
-  - Optional periodic reload of train JSONL from disk (--reload-data-every / --reload-data-each-epoch)
+  - Training curves: ``training_loss_history.csv`` (loss + optional TRL ``mean_token_accuracy`` via
+    ``--loss-csv-every``) + ``metrics_history.csv`` / ``statistics.pdf`` every ``--plot-every`` steps
+    (no in-loop ``evaluate()``; ``mean_token_accuracy`` is masked next-token match on labels, not
+    public-set Judge scores — use ``infer.py`` + ``evaluate.py`` for those).
   - Multi-GPU: prefer ``torchrun --nproc_per_node=N ...`` (DDP, full replica per GPU). A single
     process with ``device_map="auto"`` splits layers across GPUs and often shows poor SM balance.
     Use ``--single-gpu`` to pin the whole model to the first visible GPU when one GPU is enough.
-  - Output dirs contain ``checkpoint-{step}/`` and ``checkpoint-latest`` (symlink to newest checkpoint folder).
+  - Output: ``checkpoint-{step}/`` Trainer checkpoints (adapter + tokenizer + resume state); file
+    ``checkpoint-latest`` points at the newest step (pointer text by default; ``--checkpoint-latest-symlink``
+    for a symlink on local disks). Pass ``…/checkpoint-latest`` to infer / RL — it resolves to the real folder.
 
 HF cache: mirrors inference scripts — set HF_HOME before heavy imports.
 """
@@ -17,8 +21,6 @@ HF cache: mirrors inference scripts — set HF_HOME before heavy imports.
 from __future__ import annotations
 
 import argparse
-import hashlib
-import json
 import math
 import os
 import sys
@@ -37,7 +39,6 @@ if HF_TOKEN:
 if HF_XET_CACHE:
     os.environ.setdefault("HF_XET_CACHE", HF_XET_CACHE)
 
-import numpy as np  # noqa: E402
 import torch  # noqa: E402
 from datasets import Dataset, load_dataset  # noqa: E402
 from peft import LoraConfig, get_peft_model, prepare_model_for_kbit_training  # noqa: E402
@@ -45,86 +46,24 @@ from transformers import AutoModelForCausalLM, AutoTokenizer, BitsAndBytesConfig
 from transformers.trainer_utils import get_last_checkpoint  # noqa: E402
 from trl import SFTConfig, SFTTrainer  # noqa: E402
 
-from constants import DEFAULT_MODEL  # noqa: E402
+from constants import DEFAULT_MAX_SEQ_LEN, DEFAULT_MODEL  # noqa: E402
 from config import CHECKPOINTS_DIR, DISTILL_DIR, ensure_storage_dirs  # noqa: E402
 from sft.callbacks import (  # noqa: E402
+    CHECKPOINT_LATEST,
     LatestCheckpointSymlinkCallback,
-    ReloadTrainDatasetCallback,
-    ReloadTrainDatasetEachEpochCallback,
-    StatisticsPlotCallback,
+    TrainingLossPlotCallback,
+    TrainLossHistoryCallback,
     install_checkpoint_chunk_progress_bar,
-    load_eval_state,
-    save_eval_state,
+    resolve_checkpoint_latest_path,
 )
 
 
-EVAL_STATE_NAME = "sft_eval_state.json"
 DEFAULT_SFT_DATA = DISTILL_DIR / "sft_data.jsonl"
 DEFAULT_OUT = CHECKPOINTS_DIR / "sft"
 
 
-def messages_hash(messages: object) -> str:
-    blob = json.dumps(messages, ensure_ascii=False, sort_keys=True)
-    return hashlib.sha256(blob.encode("utf-8")).hexdigest()
-
-
-def example_hash(example: dict) -> str:
-    return messages_hash(example["messages"])
-
-
 def load_jsonl_dataset(path: Path) -> Dataset:
     return load_dataset("json", data_files=str(path), split="train")
-
-
-def initial_train_eval_split(ds: Dataset, seed: int, eval_n: int) -> tuple[Dataset, Dataset, list[str]]:
-    n = len(ds)
-    if n < 2:
-        raise ValueError(f"Dataset too small ({n} rows); need at least 2 examples.")
-    ne = min(eval_n, n - 1)
-    indices = list(range(n))
-    rng = __import__("random").Random(seed)
-    rng.shuffle(indices)
-    eval_indices = indices[:ne]
-    train_indices = indices[ne:]
-    eval_ds = ds.select(eval_indices)
-    train_ds = ds.select(train_indices)
-    hashes = [example_hash(ds[i]) for i in eval_indices]
-    return train_ds, eval_ds, hashes
-
-
-def rebuild_eval_from_hashes(path: Path, hashes: list[str]) -> Dataset:
-    ds = load_jsonl_dataset(path)
-    hset = set(hashes)
-
-    def filt(ex: dict) -> bool:
-        return example_hash(ex) in hset
-
-    return ds.filter(filt)
-
-
-def rebuild_train_excluding_hashes(path: Path, exclude_hashes: set[str], shuffle_seed: int) -> Dataset:
-    ds = load_jsonl_dataset(path)
-
-    def filt(ex: dict) -> bool:
-        return example_hash(ex) not in exclude_hashes
-
-    return ds.filter(filt).shuffle(seed=shuffle_seed)
-
-
-def preprocess_logits_for_metrics(logits: torch.Tensor, labels: torch.Tensor) -> torch.Tensor:
-    del labels
-    if isinstance(logits, tuple):
-        logits = logits[0]
-    return logits.argmax(dim=-1)
-
-
-def compute_metrics(eval_pred):
-    preds = eval_pred.predictions
-    labels = eval_pred.label_ids
-    mask = labels != -100
-    correct = np.sum((preds == labels) * mask)
-    total = np.sum(mask)
-    return {"accuracy": float(correct) / max(float(total), 1.0)}
 
 
 def estimated_optimizer_steps(
@@ -162,19 +101,27 @@ def parse_args():
     p.add_argument("--model", type=str, default=DEFAULT_MODEL)
     p.add_argument("--seed", type=int, default=42)
 
-    p.add_argument("--eval-num-examples", type=int, default=32,
-                   help="Examples held out for stratified eval plots (stable across reloads via hashes)")
-    p.add_argument("--plot-every", type=int, default=250,
-                   help="Steps between metrics CSV append + statistics.pdf refresh")
+    p.add_argument(
+        "--plot-every",
+        type=int,
+        default=250,
+        help="Steps between metrics_history.csv + statistics.pdf refresh (training loss + TRL mean_token_accuracy)",
+    )
     p.add_argument("--save-every", type=int, default=250, help="Checkpoint save interval (steps)")
+    p.add_argument(
+        "--checkpoint-latest-symlink",
+        action="store_true",
+        help="Write checkpoint-latest as a symlink (default: one-line pointer file — reliable on NFS/deepfreeze)",
+    )
     p.add_argument("--logging-steps", type=int, default=10)
-    p.add_argument("--skip-acc-eval", action="store_true",
-                   help="Loss-only statistics.pdf (no trainer.evaluate — faster)")
-
-    p.add_argument("--reload-data-every", type=int, default=0,
-                   help="Reload train JSONL from disk every N steps (0 = off)")
-    p.add_argument("--reload-data-each-epoch", action="store_true",
-                   help="Reload train JSONL at each epoch start (fallback)")
+    p.add_argument(
+        "--loss-csv-every",
+        type=int,
+        default=10,
+        help="Append training_loss_history.csv every N global steps when Trainer logs loss "
+        "(includes mean_token_accuracy when TRL logs it; no eval). "
+        "Use a small N for a smooth curve; frequency also follows --logging-steps. Set to 0 to disable.",
+    )
 
     p.add_argument("--resume", action="store_true",
                    help="Resume from latest checkpoint in output-dir")
@@ -206,8 +153,12 @@ def parse_args():
         default=0.03,
         help="Used only when --warmup-steps is unset: fraction of estimated training steps",
     )
-    p.add_argument("--max-seq-length", type=int, default=4096,
-                   help="Max sequence length passed to TRL as max_length (default: 4096)")
+    p.add_argument(
+        "--max-seq-length",
+        type=int,
+        default=DEFAULT_MAX_SEQ_LEN,
+        help=f"Max sequence length passed to TRL as max_length (default: constants.DEFAULT_MAX_SEQ_LEN = {DEFAULT_MAX_SEQ_LEN})",
+    )
     p.add_argument(
         "--single-gpu",
         action="store_true",
@@ -242,8 +193,6 @@ def main():
     if not data_path.is_file():
         raise FileNotFoundError(f"Training data not found: {data_path}")
 
-    eval_state_path = output_dir / EVAL_STATE_NAME
-
     resume_ckpt: str | None = None
     if args.resume_from:
         resume_ckpt = str(Path(args.resume_from).resolve())
@@ -252,46 +201,14 @@ def main():
         if not resume_ckpt:
             raise ValueError(f"No checkpoint-* folder found under {output_dir}; cannot --resume.")
 
-    exclude_hashes: set[str]
+    train_ds = load_jsonl_dataset(data_path)
+    if len(train_ds) == 0:
+        raise ValueError(f"Training data is empty: {data_path}")
+    train_ds = train_ds.shuffle(seed=args.seed)
 
     if resume_ckpt:
-        state = load_eval_state(eval_state_path)
-        if not state:
-            raise ValueError(
-                f"Resume requires {eval_state_path} (eval split hashes). "
-                "Train once without --resume to create it."
-            )
-        exclude_hashes = set(state["eval_hashes"])
-        eval_ds = rebuild_eval_from_hashes(data_path, state["eval_hashes"])
-        train_ds = rebuild_train_excluding_hashes(data_path, exclude_hashes, args.seed)
         print(f"[resume] checkpoint={resume_ckpt}")
-        print(f"[resume] eval examples recovered: {len(eval_ds)} (expected {len(exclude_hashes)})")
-    else:
-        ds = load_jsonl_dataset(data_path)
-        train_ds, eval_ds, eval_hashes_list = initial_train_eval_split(
-            ds, args.seed, args.eval_num_examples,
-        )
-        exclude_hashes = set(eval_hashes_list)
-        if local_rank <= 0:
-            save_eval_state(eval_state_path, args.seed, len(eval_hashes_list), eval_hashes_list)
-            print(f"[init] train examples={len(train_ds)} eval examples={len(eval_ds)} (hashes saved → {eval_state_path})")
-        else:
-            print(
-                f"[init] train examples={len(train_ds)} eval examples={len(eval_ds)} "
-                f"(DDP rank {local_rank}; eval hashes from rank 0)",
-            )
-
-    if len(eval_ds) == 0:
-        raise RuntimeError("Eval dataset is empty — cannot compute plot metrics.")
-
-    # Stratified eval subsets (masked token accuracy on teacher targets)
-    if "is_mcq" in eval_ds.column_names:
-        eval_mcq = eval_ds.filter(lambda x: bool(x["is_mcq"]))
-        eval_frq = eval_ds.filter(lambda x: not bool(x["is_mcq"]))
-    else:
-        eval_mcq = eval_ds.select([])
-        eval_frq = eval_ds.select([])
-        print("[warn] JSONL rows lack 'is_mcq'; MCQ/FRQ panels will be empty (merge.py adds this field).")
+    print(f"[train] examples={len(train_ds)} (full JSONL, seed={args.seed})")
 
     lora_alpha = args.lora_alpha if args.lora_alpha is not None else 2 * args.lora_r
 
@@ -313,8 +230,7 @@ def main():
         warmup_steps = max(0, int(round(est_steps * args.warmup_ratio)))
     ex_per_step = max(1, args.batch_size * args.grad_accum * max(1, world_size))
     print(
-        f"[train] train examples={len(train_ds)} | "
-        f"≈{ex_per_step} examples per global optimizer step "
+        f"[train] ≈{ex_per_step} examples per global optimizer step "
         f"(world_size={max(1, world_size)} × batch × grad_accum) | "
         f"estimated optimizer steps ≈ {est_steps}; warmup_steps={warmup_steps}",
     )
@@ -421,39 +337,23 @@ def main():
     training_args = SFTConfig(**sft_kw)
 
     callbacks = [
-        StatisticsPlotCallback(
+        TrainingLossPlotCallback(
             output_dir=output_dir,
             plot_every=args.plot_every,
-            skip_acc_eval=args.skip_acc_eval,
         ),
-        LatestCheckpointSymlinkCallback(),
+        LatestCheckpointSymlinkCallback(use_symlink=args.checkpoint_latest_symlink),
     ]
-
-    base_seed = args.seed
-
-    def rebuild_train(step: int):
-        return rebuild_train_excluding_hashes(data_path, exclude_hashes, base_seed + step)
-
-    if args.reload_data_every > 0:
-        callbacks.append(
-            ReloadTrainDatasetCallback(
-                reload_every=args.reload_data_every,
-                rebuild_train_fn=rebuild_train,
-            )
-        )
-    elif args.reload_data_each_epoch:
-        callbacks.append(
-            ReloadTrainDatasetEachEpochCallback(rebuild_train_fn=rebuild_train),
+    if int(args.loss_csv_every) > 0:
+        callbacks.insert(
+            0,
+            TrainLossHistoryCallback(output_dir=output_dir, every=int(args.loss_csv_every)),
         )
 
     trainer_kw = dict(
         model=model,
         args=training_args,
         train_dataset=train_ds,
-        eval_dataset={"mcq": eval_mcq, "frq": eval_frq, "overall": eval_ds},
         formatting_func=formatting_func,
-        compute_metrics=compute_metrics,
-        preprocess_logits_for_metrics=preprocess_logits_for_metrics,
         callbacks=callbacks,
     )
     try:
@@ -466,14 +366,25 @@ def main():
     for cb in callbacks:
         cb.trainer = trainer
 
-    trainer._sft_formatting_func = formatting_func  # noqa: SLF001 — reload callbacks + disk reload tokenization
+    trainer._sft_formatting_func = formatting_func  # noqa: SLF001
 
     install_checkpoint_chunk_progress_bar(trainer)
 
     trainer.train(resume_from_checkpoint=resume_ckpt)
-    trainer.save_model(str(output_dir))
-    tokenizer.save_pretrained(str(output_dir))
-    print(f"Done. Adapter + tokenizer saved under {output_dir}")
+
+    link_path = output_dir / CHECKPOINT_LATEST
+    resolved = resolve_checkpoint_latest_path(link_path)
+    if resolved.is_dir():
+        print(f"Done. Primary checkpoint for inference / RL: {resolved.resolve()}")
+    else:
+        fallback = get_last_checkpoint(str(output_dir))
+        if fallback:
+            print(
+                f"Done. Latest folder: {fallback}. "
+                f"Expected {link_path.name} missing or unresolved — use this folder or re-save.",
+            )
+        else:
+            print(f"Done. Warning: no checkpoint-* saved under {output_dir}")
 
 
 if __name__ == "__main__":

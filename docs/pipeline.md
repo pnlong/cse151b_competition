@@ -213,23 +213,23 @@ pip install trl peft datasets matplotlib
 **Example train** (from repo root, env activated):
 
 ```bash
-CUDA_VISIBLE_DEVICES=0 python sft/train.py \
-    --reload-data-every 1000   # optional: pick up newly merged sft_data.jsonl while distill runs
+CUDA_VISIBLE_DEVICES=0 python sft/train.py
 ```
 
-Artifacts under `CHECKPOINTS_DIR/sft/`: adapter checkpoints, `statistics.pdf` (loss + MCQ/FRQ/overall token accuracy on the fixed eval shard), `metrics_history.csv`, `sft_eval_state.json` (eval split — required for `--resume`).
+Artifacts under `CHECKPOINTS_DIR/sft/`: `checkpoint-{step}/` (adapter + tokenizer + Trainer state), `checkpoint-latest` (pointer file by default, or symlink with `--checkpoint-latest-symlink`) indicating the newest step — `infer.py` resolves it to the real folder, `statistics.pdf` + `metrics_history.csv` (three columns: `global_step`, `train_loss`, `mean_token_accuracy`; sparse snapshots every `--plot-every` steps; masked next-token match, not Judge/public accuracy), `training_loss_history.csv` (frequent loss + optional `mean_token_accuracy` via `--loss-csv-every`).
 
 **What happens**:
-1. Load `DISTILL_DIR/sft_data.jsonl`
+1. Load full `DISTILL_DIR/sft_data.jsonl` (shuffled with `--seed`; no held-out rows)
 2. LoRA fine-tune `Qwen/Qwen3-4B-Thinking-2507` using `trl.SFTTrainer`
    - LoRA rank r=16–64, target modules: q_proj, v_proj (and possibly k_proj, o_proj)
    - QLoRA (4-bit base + LoRA adapters) to fit on 2×24GB
-3. Save checkpoint to `CHECKPOINTS_DIR/sft/`
+3. Save checkpoints under `CHECKPOINTS_DIR/sft/checkpoint-{step}/`; `checkpoint-latest` points at the newest.
+   - Checkpoints follow `--save-every`. Plots / `metrics_history.csv` follow `--plot-every` (training loss + TRL `mean_token_accuracy` — run `infer.py` + `evaluate.py` on the public set for Judge accuracy).
 
 **Eval after SFT**:
 ```bash
 CUDA_VISIBLE_DEVICES=0 python inference/infer.py --gpu \
-    --model CHECKPOINTS_DIR/sft \
+    --model CHECKPOINTS_DIR/sft/checkpoint-latest \
     --data data/public.jsonl --output /deepfreeze/pnlong/school/cse151b/final/results/public_sft.csv
 python inference/evaluate.py --results /deepfreeze/pnlong/school/cse151b/final/results/public_sft.csv \
     --model "Qwen3-4B" --checkpoint sft --n-samples 4
@@ -248,22 +248,22 @@ Compare accuracy to the Stage 1 baseline in `RESULTS_DIR/eval_log.csv` to confir
 **How to train** (needs recent **`trl`** with `GRPOTrainer`, compatible **`transformers`**, and **`pillow>=10`** if you see `AutoProcessor`/PIL errors):
 ```bash
 CUDA_VISIBLE_DEVICES=0 python rl/train.py \
-    --model CHECKPOINTS_DIR/sft \
+    --model CHECKPOINTS_DIR/sft/checkpoint-latest \
     --data data/public.jsonl \
-    --output CHECKPOINTS_DIR/rl
+    --output-dir CHECKPOINTS_DIR/rl
 
 # Multi-GPU (prefer this over one process with device_map="auto" on all visible GPUs):
 CUDA_VISIBLE_DEVICES=0,1 accelerate launch --num_processes=2 rl/train.py \
-    --model CHECKPOINTS_DIR/sft \
+    --model CHECKPOINTS_DIR/sft/checkpoint-latest \
     --data data/public.jsonl \
-    --output CHECKPOINTS_DIR/rl
+    --output-dir CHECKPOINTS_DIR/rl
 ```
 
 **What happens**:
-1. Start from the SFT LoRA directory (or a full model id): load base weights, attach adapter when `adapter_config.json` is present (QLoRA by default, `--no-qlora` for bf16).
+1. Start from the SFT adapter folder (`checkpoint-latest` or `checkpoint-{step}`): load base weights, attach adapter when `adapter_config.json` is present (QLoRA by default, `--no-qlora` for bf16).
 2. **`rl/train.py`** builds chat prompts from `public.jsonl` the same way as inference (`build_prompt` + `apply_chat_template_safe`). TRL **`GRPOTrainer`** samples **K** completions per prompt (`--num-generations`, default 4).
 3. **`rl/rewards.py`** scores each completion: MCQ via **`score_mcq`** (same as `inference/evaluate.py`); free-form via **`Judger.auto_judge`** for a single blank, or **mean per-slot `Judger.is_equal`** when the gold answer is a list of length > 1 (multi-`[ANS]` partial credit). Adds a small **`\boxed{}`** format bonus (`--format-bonus`, default `0.02`).
-4. Periodic saves under `--output`; whenever the logged aggregate **`reward`** improves, a copy is written to **`checkpoint-best-reward/`** (rank 0 only).
+4. Periodic saves under ``--output-dir`` (same cadence defaults as SFT: ``--save-every``, ``--save-total-limit``); ``checkpoint-latest`` pointer or symlink; ``--resume`` / ``--resume-from``. Checkpoint-aligned tqdm segments and log postfix (loss / reward / …) match ``sft/train.py``. Whenever the logged aggregate **`reward`** improves, a copy is written to **`checkpoint-best-reward/`** (rank 0 only).
 
 **Key design note on answer equivalence**: The GRPO reward must use `Judger.auto_judge()` (not simple string match) so that equivalent forms like `-0.65` and `-13/20` both score as correct.
 
@@ -286,7 +286,7 @@ python inference/evaluate.py --results /deepfreeze/pnlong/school/cse151b/final/r
 
 ```bash
 CUDA_VISIBLE_DEVICES=0 python inference/infer.py --gpu \
-    --model CHECKPOINTS_DIR/rl \   # or /sft if RL didn't help
+    --model CHECKPOINTS_DIR/rl \   # or CHECKPOINTS_DIR/sft/checkpoint-latest if RL didn't help
     --n-samples 4 \
     --output /deepfreeze/pnlong/school/cse151b/final/results/final_submission.csv
 ```
@@ -311,7 +311,7 @@ STORAGE_DIR/
 │   │   └── ...
 │   └── sft_data.jsonl
 ├── checkpoints/
-│   ├── sft/                    SFT LoRA checkpoint
+│   ├── sft/                    SFT: checkpoint-{step}/, checkpoint-latest (pointer/symlink) → infer / GRPO
 │   └── rl/                     GRPO RL checkpoint
 ├── results/
 │   ├── public_baseline.csv
@@ -329,6 +329,6 @@ STORAGE_DIR/
 |-------|--------|-------|
 | Baseline inference pipeline | ✅ Built | `inference/infer.py`, `inference/evaluate.py` |
 | Distillation pipeline | ✅ Built | `distill/collect.py`, `distill/merge.py` |
-| SFT | ✅ Built | `sft/train.py` — LoRA/QLoRA, resume, `statistics.pdf`, optional dataset reload |
+| SFT | ✅ Built | `sft/train.py` — LoRA/QLoRA, resume, `statistics.pdf` |
 | RL (GRPO) | ✅ Built | `rl/train.py`, `rl/rewards.py`; best `reward` → `checkpoint-best-reward/` |
 | Final submission | 🔲 Not started | Pending RL if used; SFT path ready |

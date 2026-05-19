@@ -69,6 +69,7 @@ from constants import (
     MULTI_ANS_NOTE,
 )
 from config import PRIVATE_DATA, RESULTS_DIR, HF_CACHE_DIR
+from sft.progress_callbacks import resolve_checkpoint_latest_path
 from inference.utils import (
     load_jsonl,
     build_prompt,
@@ -165,6 +166,9 @@ def append_rows(rows: list[dict], out_path: Path, write_header: bool) -> None:
 
 def main():
     args = parse_args()
+    _mp = resolve_checkpoint_latest_path(Path(args.model))
+    if _mp.is_dir():
+        args.model = str(_mp.resolve())
     # When infer_parallel.py runs workers, it sets INFER_PARALLEL_WORKER=1 so tqdm/log
     # output is plain print (full logs go to per-shard *.log files).
     _parallel_worker = os.environ.get("INFER_PARALLEL_WORKER", "").lower() in (

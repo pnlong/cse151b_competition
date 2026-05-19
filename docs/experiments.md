@@ -217,11 +217,11 @@ Output: `STORAGE_DIR/distillation/sft_data.jsonl`
 
 ### 2c. LoRA SFT training
 
-Fine-tune Qwen3-4B on `sft_data.jsonl` using LoRA (QLoRA: 4-bit base + LoRA adapters). Checkpoints and plots go under `STORAGE_DIR/checkpoints/sft/` by default.
+Fine-tune Qwen3-4B on `sft_data.jsonl` using LoRA (QLoRA: 4-bit base + LoRA adapters). Trainer checkpoints live under `STORAGE_DIR/checkpoints/sft/checkpoint-{step}/` with `checkpoint-latest` (pointer file by default; optional symlink) for inference and GRPO.
 
 **Relevant files**:
-- `sft/train.py` — `trl.SFTTrainer`, resume, `statistics.pdf`, optional JSONL reload
-- `sft/callbacks.py` — metrics CSV / plots / reload hooks
+- `sft/train.py` — `trl.SFTTrainer`, resume; training loss CSV/PDF (no in-training `evaluate()`)
+- `sft/callbacks.py` — metrics CSV / plots
 - `constants.py` — default student model id
 - `config.py` — `DISTILL_DIR`, `CHECKPOINTS_DIR`
 
@@ -248,7 +248,7 @@ CUDA_VISIBLE_DEVICES=0,1 torchrun --standalone --nproc_per_node=2 sft/train.py \
     --output-dir /deepfreeze/pnlong/school/cse151b/final/checkpoints/sft/
 ```
 
-**What to report**: training loss curve (`statistics.pdf` / `metrics_history.csv`), checkpoint step, and note single-GPU vs `torchrun` configuration.
+**What to report**: training loss + optional TRL `mean_token_accuracy` (`training_loss_history.csv`, `statistics.pdf` / `metrics_history.csv`; token accuracy is masked LM match on labels, not Judge scores), checkpoint step, and public-set scores from `infer.py` + `evaluate.py`; note single-GPU vs `torchrun` configuration.
 
 ---
 
@@ -264,7 +264,7 @@ Run the SFT checkpoint on the public set and compare accuracy to the Experiment 
 **How to run**:
 ```bash
 CUDA_VISIBLE_DEVICES=0 python inference/infer.py --gpu --quantize \
-    --model /deepfreeze/pnlong/school/cse151b/final/checkpoints/sft \
+    --model /deepfreeze/pnlong/school/cse151b/final/checkpoints/sft/checkpoint-latest \
     --data data/public.jsonl \
     --n-samples 4 \
     --output /deepfreeze/pnlong/school/cse151b/final/results/public_sft_n4.csv
@@ -301,18 +301,18 @@ Start from the SFT checkpoint. For each question, generate K responses and score
 ```bash
 # Single GPU (QLoRA continues SFT 4-bit adapter by default; add --no-qlora for bf16 LoRA)
 CUDA_VISIBLE_DEVICES=0 python rl/train.py \
-    --model /deepfreeze/pnlong/school/cse151b/final/checkpoints/sft \
+    --model /deepfreeze/pnlong/school/cse151b/final/checkpoints/sft/checkpoint-latest \
     --data data/public.jsonl \
-    --output /deepfreeze/pnlong/school/cse151b/final/checkpoints/rl/
+    --output-dir /deepfreeze/pnlong/school/cse151b/final/checkpoints/rl/
 
 # Multi-GPU data parallel (recommended over one process + device_map=auto)
 CUDA_VISIBLE_DEVICES=0,1 accelerate launch --num_processes=2 rl/train.py \
-    --model /deepfreeze/pnlong/school/cse151b/final/checkpoints/sft \
+    --model /deepfreeze/pnlong/school/cse151b/final/checkpoints/sft/checkpoint-latest \
     --data data/public.jsonl \
-    --output /deepfreeze/pnlong/school/cse151b/final/checkpoints/rl/
+    --output-dir /deepfreeze/pnlong/school/cse151b/final/checkpoints/rl/
 ```
 
-Useful flags: `--num-generations K`, `--max-completion-length`, `--format-bonus` (default `0.02`, or `0` for pure outcome), `--no-qlora`, `--single-gpu`. Checkpoints: periodic saves under `--output`; best logged **`reward`** is mirrored to `checkpoint-best-reward/`.
+Defaults mirror ``sft/train.py`` where applicable (epochs, batch/grad-accum, LR, warmup, ``--save-every``, ``--save-total-limit``, segmented tqdm, ``checkpoint-latest``, ``--resume``). Useful overrides: ``--num-generations``, ``--max-completion-length``, ``--format-bonus``, ``--no-qlora``, ``--single-gpu``. Best logged **`reward`** → ``checkpoint-best-reward/``.
 
 **What to report**: reward curve over training steps, checkpoint saved at peak reward.
 

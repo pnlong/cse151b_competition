@@ -1,170 +1,58 @@
 """
-Trainer callbacks for SFT: metrics CSV + statistics.pdf and optional train-set reload.
+Trainer callbacks for SFT: training-loss CSV/PDF.
+
+Stratified ``trainer.evaluate()`` during SFT was removed (DDP / NCCL fragile); use ``infer.py`` +
+``evaluate.py`` on the public set for accuracy.
 """
 
 from __future__ import annotations
 
 import csv
-import json
+import logging
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
-from typing import Callable
 
 import matplotlib
+import torch
 
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt  # noqa: E402
-from tqdm.auto import tqdm
 from transformers import TrainerCallback, TrainerControl, TrainerState
-from transformers.trainer_callback import ProgressCallback
 from transformers.trainer_utils import PREFIX_CHECKPOINT_DIR
+
+from .progress_callbacks import (
+    CHECKPOINT_LATEST,
+    LatestCheckpointSymlinkCallback,
+    TRAINING_LOSS_HISTORY_CSV,
+    TrainLossHistoryCallback,
+    install_checkpoint_chunk_progress_bar,
+    resolve_checkpoint_latest_path,
+)
 
 
 METRICS_CSV_NAME = "metrics_history.csv"
 STATISTICS_PDF_NAME = "statistics.pdf"
-"""Symlink name updated on every checkpoint save (directory symlink → ``checkpoint-{step}``)."""
-CHECKPOINT_LATEST = "checkpoint-latest"
 
+# Sparse snapshots every ``plot_every`` optimizer steps (same cadence as statistics.pdf).
+METRICS_CSV_FIELDNAMES = ("global_step", "train_loss", "mean_token_accuracy")
 
-class CheckpointChunkProgressCallback(TrainerCallback):
-    """
-    tqdm segments of ``save_steps`` optimizer steps (checkpoint cadence), restarting the bar each segment.
-    Last segment may be shorter. Loss / token accuracy only as postfix (no dict spam).
-    Total optimizer steps are logged once at train start; the bar title stays short (segment id + global step range).
-    """
+_log = logging.getLogger(__name__)
 
-    def __init__(self) -> None:
-        super().__init__()
-        self.bar = None
-        self._cur_seg_start: int | None = None
-        self._printed_step_banner = False
-
-    @staticmethod
-    def _num_chunks(max_steps: int, chunk: int) -> int:
-        chunk = max(1, chunk)
-        ms = max(0, max_steps)
-        return max(1, (ms + chunk - 1) // chunk)
-
-    @staticmethod
-    def _chunk_index_one_based(gs: int, chunk: int) -> int:
-        chunk = max(1, chunk)
-        return (max(gs, 1) - 1) // chunk + 1
-
-    def on_train_begin(self, args, state, control, **kwargs):
-        self.bar = None
-        self._cur_seg_start = None
-        self._printed_step_banner = False
-        if state.is_world_process_zero:
-            chunk = int(args.save_steps) if getattr(args, "save_steps", None) else 500
-            chunk = max(1, chunk)
-            max_steps = int(state.max_steps or 0)
-            if max_steps > 0:
-                n_chunks = self._num_chunks(max_steps, chunk)
-                print(
-                    f"[progress] total optimizer steps={max_steps}; "
-                    f"{n_chunks} tqdm segments (up to {chunk} steps each, aligned to checkpoint cadence)",
-                )
-                self._printed_step_banner = True
-        return control
-
-    def _segment_bounds(self, gs: int, max_steps: int, chunk: int) -> tuple[int, int, int]:
-        chunk = max(1, chunk)
-        seg_start = ((max(gs, 1) - 1) // chunk) * chunk + 1
-        seg_end = min(seg_start + chunk - 1, max_steps)
-        seg_total = seg_end - seg_start + 1
-        return seg_start, seg_end, seg_total
-
-    def on_step_end(self, args, state: TrainerState, control: TrainerControl, **kwargs):
-        if not state.is_world_process_zero:
-            return control
-        gs = int(state.global_step)
-        max_steps = int(state.max_steps)
-        chunk = int(args.save_steps) if getattr(args, "save_steps", None) else 500
-        chunk = max(1, chunk)
-        seg_start, seg_end, seg_total = self._segment_bounds(gs, max_steps, chunk)
-        pos_done = min(gs - seg_start + 1, seg_total)
-        total_chunks = self._num_chunks(max_steps, chunk)
-        chunk_i = self._chunk_index_one_based(gs, chunk)
-
-        if not self._printed_step_banner and max_steps > 0:
-            print(
-                f"[progress] total optimizer steps={max_steps}; "
-                f"{total_chunks} tqdm segments (up to {chunk} steps each, aligned to checkpoint cadence)",
-            )
-            self._printed_step_banner = True
-
-        if self.bar is None or seg_start != self._cur_seg_start:
-            if self.bar is not None:
-                self.bar.close()
-            self._cur_seg_start = seg_start
-            self.bar = tqdm(
-                total=seg_total,
-                initial=min(pos_done, seg_total),
-                dynamic_ncols=True,
-                unit="step",
-                desc=f"Training [{chunk_i}/{total_chunks}] {seg_start}-{seg_end}",
-            )
-        else:
-            self.bar.update(1)
-
-        return control
-
-    def on_log(self, args, state: TrainerState, control: TrainerControl, logs=None, **kwargs):
-        if (
-            not state.is_world_process_zero
-            or self.bar is None
-            or logs is None
-        ):
-            return control
-        loss = logs.get("loss")
-        mta = logs.get("mean_token_accuracy")
-        parts: list[str] = []
-        if loss is not None:
-            parts.append(f"loss={float(loss):.4g}")
-        if mta is not None:
-            parts.append(f"mean_tok_acc={float(mta):.4g}")
-        if parts:
-            self.bar.set_postfix_str(", ".join(parts))
-        return control
-
-    def on_train_end(self, args, state: TrainerState, control: TrainerControl, **kwargs):
-        if state.is_world_process_zero and self.bar is not None:
-            self.bar.close()
-            self.bar = None
-            self._cur_seg_start = None
-        return control
-
-
-class LatestCheckpointSymlinkCallback(TrainerCallback):
-    """Keeps ``checkpoint-latest`` → newest numeric ``checkpoint-{step}`` (rank 0 only)."""
-
-    def on_save(self, args, state: TrainerState, control: TrainerControl, **kwargs):
-        if not state.is_world_process_zero:
-            return control
-        run_dir = Path(args.output_dir)
-        step = int(state.global_step)
-        target_name = f"{PREFIX_CHECKPOINT_DIR}-{step}"
-        target = run_dir / target_name
-        link = run_dir / CHECKPOINT_LATEST
-        if not target.is_dir():
-            return control
-        try:
-            link.unlink(missing_ok=True)
-            link.symlink_to(target_name, target_is_directory=True)
-        except OSError:
-            pass
-        return control
-
-
-def install_checkpoint_chunk_progress_bar(trainer) -> None:
-    """Swap HF's tqdm callback for checkpoint-aligned chunk progress."""
-    trainer.pop_callback(ProgressCallback)
+def _distributed_barrier() -> None:
+    """Synchronize all ranks; NCCL uses explicit device to avoid implicit-device UserWarnings."""
+    if not torch.distributed.is_initialized():
+        return
     try:
-        from transformers.utils.notebook import NotebookProgressCallback
-
-        trainer.pop_callback(NotebookProgressCallback)
-    except ImportError:
-        pass
-    trainer.add_callback(CheckpointChunkProgressCallback())
+        nccl_cuda = (
+            torch.distributed.get_backend() == "nccl"
+            and torch.cuda.is_available()
+        )
+    except RuntimeError:
+        nccl_cuda = False
+    if nccl_cuda:
+        torch.distributed.barrier(device_ids=[torch.cuda.current_device()])
+    else:
+        torch.distributed.barrier()
 
 
 def _latest_train_loss(state: TrainerState) -> float | None:
@@ -177,13 +65,68 @@ def _latest_train_loss(state: TrainerState) -> float | None:
     return None
 
 
-class StatisticsPlotCallback(TrainerCallback):
-    """
-    Every ``plot_every`` steps: append metrics_history.csv and regenerate statistics.pdf.
+def _latest_mean_token_accuracy(state: TrainerState) -> float | None:
+    """TRL ``SFTTrainer`` averages masked next-token match into ``mean_token_accuracy`` (training batches)."""
+    for entry in reversed(state.log_history):
+        if "mean_token_accuracy" in entry and entry.get("step") == state.global_step:
+            return float(entry["mean_token_accuracy"])
+    for entry in reversed(state.log_history):
+        if "mean_token_accuracy" in entry:
+            return float(entry["mean_token_accuracy"])
+    return None
 
-    Train loss comes from trainer.state.log_history. Stratified accuracies come from
-    ``trainer.evaluate`` on MCQ / FRQ / overall subsets (masked token accuracy); those subsets must be
-    tokenized via ``SFTTrainer(eval_dataset={...})``.
+
+def _accuracy_ylim(values: list[float | None]) -> tuple[float, float] | None:
+    """Tight y-range around observed train token accuracy (still clipped to [0, 1])."""
+    vals = [v for v in values if v is not None]
+    if not vals:
+        return None
+    lo, hi = min(vals), max(vals)
+    span = hi - lo
+    pad = max(0.02, span * 0.15) if span > 1e-9 else 0.05
+    ymin = max(0.0, lo - pad)
+    ymax = min(1.0, hi + pad)
+    if ymax <= ymin:
+        ymax = min(1.0, ymin + 0.08)
+    return ymin, ymax
+
+
+def _load_training_loss_history_rows(path: Path) -> tuple[list[int], list[float]]:
+    """Parse ``training_loss_history.csv`` for ``global_step`` / ``train_loss``."""
+    if not path.is_file():
+        return [], []
+    with open(path, newline="", encoding="utf-8") as f:
+        rows = list(csv.DictReader(f))
+    steps_out: list[int] = []
+    loss_out: list[float] = []
+    for r in rows:
+        try:
+            gs_raw = (r.get("global_step") or "").strip()
+            lv_raw = (r.get("train_loss") or "").strip()
+            if not gs_raw or not lv_raw:
+                continue
+            steps_out.append(int(gs_raw))
+            loss_out.append(float(lv_raw))
+        except (TypeError, ValueError):
+            continue
+    return steps_out, loss_out
+
+
+class TrainingLossPlotCallback(TrainerCallback):
+    """
+    Append ``metrics_history.csv`` + ``statistics.pdf`` on a schedule: **training loss** and
+    **mean_token_accuracy** from TRL ``SFTTrainer`` logs (masked next-token match on labels — not
+    public-set Judge accuracy).
+
+    Does **not** call ``trainer.evaluate()`` during training (DDP / NCCL fragile at scale). For
+    leaderboard scores use ``inference/infer.py`` + ``inference/evaluate.py``.
+
+    Refreshes every ``plot_every`` global steps (``--plot-every``). PDF: sparse metrics (loss +
+    token accuracy), dense loss from ``training_loss_history.csv`` when present.
+
+    When a plot step coincides with ``save_steps``, CSV update runs in ``on_save`` (after checkpoint).
+    Under DDP, non-zero ranks barrier only around rank 0 appending ``metrics_history.csv``; PDF rendering
+    runs in a background thread on rank 0 so tqdm / the training loop are not blocked by matplotlib.
     """
 
     def __init__(
@@ -191,87 +134,114 @@ class StatisticsPlotCallback(TrainerCallback):
         *,
         output_dir: Path,
         plot_every: int,
-        skip_acc_eval: bool,
         metrics_csv_name: str = METRICS_CSV_NAME,
         pdf_name: str = STATISTICS_PDF_NAME,
     ) -> None:
         super().__init__()
         self.output_dir = Path(output_dir)
         self.plot_every = max(1, int(plot_every))
-        self.skip_acc_eval = skip_acc_eval
         self.metrics_csv_path = self.output_dir / metrics_csv_name
         self.pdf_path = self.output_dir / pdf_name
-        # Populated by train.py after SFTTrainer is constructed (HF omits trainer from kwargs).
         self.trainer = None
+        self._last_metrics_global_step: int | None = None
+        self._pdf_executor: ThreadPoolExecutor | None = None
+
+    @staticmethod
+    def _ddp_sync_needed(trainer) -> bool:
+        if not torch.distributed.is_available():
+            return False
+        if not torch.distributed.is_initialized():
+            return False
+        return int(getattr(trainer.args, "world_size", 1) or 1) > 1
+
+    def _run_plot_synchronized(self, trainer, state: TrainerState, *, triggered_from: str) -> None:
+        """All ranks barrier around rank 0 appending CSV (PDF runs later on a worker thread)."""
+        if not self._ddp_sync_needed(trainer):
+            self._maybe_plot(trainer, state, triggered_from=triggered_from)
+            return
+        _distributed_barrier()
+        try:
+            if trainer.is_world_process_zero():
+                self._maybe_plot(trainer, state, triggered_from=triggered_from)
+        finally:
+            _distributed_barrier()
+
+    @staticmethod
+    def _checkpoint_save_this_step(args, step: int) -> bool:
+        strategy = getattr(args, "save_strategy", None)
+        if strategy is None:
+            return False
+        name = getattr(strategy, "value", strategy)
+        if name != "steps":
+            return False
+        ss = int(getattr(args, "save_steps", 0) or 0)
+        return ss > 0 and step % ss == 0
 
     def _append_csv_row(self, row: dict[str, object]) -> None:
         self.output_dir.mkdir(parents=True, exist_ok=True)
         write_header = not self.metrics_csv_path.exists()
         with open(self.metrics_csv_path, "a", newline="") as f:
-            fieldnames = [
-                "global_step",
-                "train_loss",
-                "eval_accuracy_mcq",
-                "eval_accuracy_frq",
-                "eval_accuracy_overall",
-            ]
-            w = csv.DictWriter(f, fieldnames=fieldnames, extrasaction="ignore")
+            w = csv.DictWriter(f, fieldnames=list(METRICS_CSV_FIELDNAMES), extrasaction="ignore")
             if write_header:
                 w.writeheader()
             w.writerow(row)
 
-    def _run_eval_accuracy(self, trainer, key: str) -> float | None:
-        eds = getattr(trainer, "eval_dataset", None)
-        if not isinstance(eds, dict) or key not in eds:
-            return None
-        ds = eds[key]
-        if ds is None or len(ds) == 0:
-            return None
-        metrics = trainer.evaluate(eval_dataset=ds, metric_key_prefix=f"{key}_")
-        # Trainer prefixes metric keys; search for accuracy
-        for k, v in metrics.items():
-            lk = k.lower()
-            if "accuracy" in lk and "runtime" not in lk:
-                return float(v)
-        return None
-
-    def _maybe_plot(self, trainer, state: TrainerState) -> None:
+    def _maybe_plot(self, trainer, state: TrainerState, *, triggered_from: str) -> None:
         step = int(state.global_step)
-        if step <= 0 or step % self.plot_every != 0:
+        if step <= 0:
             return
-
-        # Avoid duplicate full evals on every DDP rank (expensive and can deadlock I/O).
+        if self._last_metrics_global_step == step:
+            return
         if not trainer.is_world_process_zero():
             return
 
-        acc_mcq = acc_frq = acc_overall = None
-        if not self.skip_acc_eval:
-            acc_mcq = self._run_eval_accuracy(trainer, "mcq")
-            acc_frq = self._run_eval_accuracy(trainer, "frq")
-            acc_overall = self._run_eval_accuracy(trainer, "overall")
-
         train_loss = _latest_train_loss(state)
+        mta = _latest_mean_token_accuracy(state)
         self._append_csv_row(
             {
                 "global_step": step,
                 "train_loss": "" if train_loss is None else round(train_loss, 6),
-                "eval_accuracy_mcq": "" if acc_mcq is None else round(acc_mcq, 6),
-                "eval_accuracy_frq": "" if acc_frq is None else round(acc_frq, 6),
-                "eval_accuracy_overall": "" if acc_overall is None else round(acc_overall, 6),
+                "mean_token_accuracy": "" if mta is None else round(mta, 6),
             }
         )
-        self._render_pdf()
+        self._schedule_pdf_render()
+        self._last_metrics_global_step = step
+
+    def _schedule_pdf_render(self) -> None:
+        """Matplotlib work off the training thread so tqdm is not stalled."""
+
+        def run() -> None:
+            try:
+                self._render_pdf()
+            except Exception:
+                _log.debug("statistics.pdf render failed", exc_info=True)
+
+        if self._pdf_executor is None:
+            self._pdf_executor = ThreadPoolExecutor(
+                max_workers=1,
+                thread_name_prefix="sft-loss-pdf",
+            )
+        self._pdf_executor.submit(run)
+
+    def on_train_end(self, args, state: TrainerState, control: TrainerControl, **kwargs):
+        if state.is_world_process_zero and self._pdf_executor is not None:
+            self._pdf_executor.shutdown(wait=True)
+            self._pdf_executor = None
+        return control
 
     def _render_pdf(self) -> None:
-        if not self.metrics_csv_path.exists():
-            return
         rows: list[dict[str, str]] = []
-        with open(self.metrics_csv_path, newline="") as f:
-            rows = list(csv.DictReader(f))
-        if not rows:
+        if self.metrics_csv_path.is_file():
+            with open(self.metrics_csv_path, newline="", encoding="utf-8") as f:
+                rows = list(csv.DictReader(f))
+
+        hist_path = self.output_dir / TRAINING_LOSS_HISTORY_CSV
+        hist_steps, hist_loss = _load_training_loss_history_rows(hist_path)
+
+        if not rows and not hist_steps:
             return
 
-        steps = [int(r["global_step"]) for r in rows]
+        steps = [int(r["global_step"]) for r in rows] if rows else []
 
         def col(name: str) -> list[float | None]:
             out: list[float | None] = []
@@ -281,46 +251,34 @@ class StatisticsPlotCallback(TrainerCallback):
             return out
 
         loss_y = col("train_loss")
-        mcq_y = col("eval_accuracy_mcq")
-        frq_y = col("eval_accuracy_frq")
-        ov_y = col("eval_accuracy_overall")
+        tok_y = col("mean_token_accuracy")
 
-        if self.skip_acc_eval:
-            fig, ax = plt.subplots(figsize=(8, 4))
-            ax.plot(steps, loss_y, marker="o", ms=3)
-            ax.set_title("Training loss (--skip-acc-eval: accuracy panels omitted)")
-            ax.set_xlabel("global_step")
-            ax.set_ylabel("loss")
-            ax.grid(True, alpha=0.3)
-            fig.savefig(self.pdf_path, format="pdf", bbox_inches="tight")
-            plt.close(fig)
-            return
+        fig, axes = plt.subplots(3, 1, figsize=(8, 9.5), sharex=True)
+        ax0, ax1, ax2 = axes
 
-        fig, axes = plt.subplots(4, 1, figsize=(8, 11), sharex=True)
-        titles = [
-            "Training loss",
-            "Eval token accuracy — MCQ (teacher targets)",
-            "Eval token accuracy — FRQ (teacher targets)",
-            "Eval token accuracy — overall (teacher targets)",
-        ]
-        series = [loss_y, mcq_y, frq_y, ov_y]
-        ylabels = ["loss", "accuracy", "accuracy", "accuracy"]
-        for ax, title, ys, ylab in zip(axes, titles, series, ylabels):
-            if any(y is not None for y in ys):
-                ax.plot(steps, ys, marker="o", ms=3)
-            ax.set_title(title)
-            ax.set_ylabel(ylab)
-            ax.grid(True, alpha=0.3)
-        axes[-1].set_xlabel("global_step")
-        fig.text(
-            0.5,
-            0.01,
-            "Accuracy = masked token match on assistant completion (not Judge / leaderboard accuracy).",
-            ha="center",
-            fontsize=8,
-            style="italic",
-        )
-        plt.tight_layout(rect=[0, 0.03, 1, 1])
+        if any(y is not None for y in loss_y):
+            ax0.plot(steps, loss_y, marker="o", ms=3)
+        ax0.set_title("Training loss (plot-every snapshots)")
+        ax0.set_ylabel("loss")
+        ax0.grid(True, alpha=0.3)
+
+        if any(y is not None for y in tok_y):
+            ax1.plot(steps, tok_y, marker="o", ms=3, color="C1")
+        ax1.set_title("Train token accuracy (TRL, masked LM)")
+        ax1.set_ylabel("accuracy")
+        ylim_acc = _accuracy_ylim(tok_y)
+        if ylim_acc is not None:
+            ax1.set_ylim(ylim_acc)
+        ax1.grid(True, alpha=0.3)
+
+        if hist_steps:
+            ax2.plot(hist_steps, hist_loss, color="C2", linewidth=1.0, alpha=0.9)
+        ax2.set_title("Training loss (logged, training_loss_history.csv)")
+        ax2.set_xlabel("global_step")
+        ax2.set_ylabel("loss")
+        ax2.grid(True, alpha=0.3)
+
+        fig.tight_layout()
         fig.savefig(self.pdf_path, format="pdf", bbox_inches="tight")
         plt.close(fig)
 
@@ -328,89 +286,35 @@ class StatisticsPlotCallback(TrainerCallback):
         trainer = self.trainer
         if trainer is None:
             return control
-        self._maybe_plot(trainer, state)
+        step = int(state.global_step)
+        if step <= 0:
+            return control
+
+        if step % self.plot_every == 0:
+            if self._checkpoint_save_this_step(args, step):
+                return control
+            self._run_plot_synchronized(trainer, state, triggered_from="on_step_end")
         return control
 
-
-class ReloadTrainDatasetCallback(TrainerCallback):
-    """Replace ``trainer.train_dataset`` from disk every ``reload_every`` steps."""
-
-    def __init__(
-        self,
-        *,
-        reload_every: int,
-        rebuild_train_fn: Callable[[int], object],
-    ) -> None:
-        super().__init__()
-        self.reload_every = int(reload_every)
-        self.rebuild_train_fn = rebuild_train_fn
-        self.trainer = None
-
-    def on_step_end(self, args, state: TrainerState, control: TrainerControl, **kwargs):
-        if self.reload_every <= 0:
+    def on_save(self, args, state: TrainerState, control: TrainerControl, **kwargs):
+        trainer = self.trainer
+        if trainer is None:
             return control
         step = int(state.global_step)
-        if step <= 0 or step % self.reload_every != 0:
+        if step <= 0:
             return control
-        trainer = self.trainer
-        if trainer is None:
+        if not self._checkpoint_save_this_step(args, step):
             return control
-        new_ds = self.rebuild_train_fn(step)
-        fmt = getattr(trainer, "_sft_formatting_func", None)
-        if hasattr(trainer, "_prepare_dataset"):
-            new_ds = trainer._prepare_dataset(
-                new_ds,
-                trainer.processing_class,
-                trainer.args,
-                trainer.args.packing,
-                fmt,
-                "train",
-            )
-        trainer.train_dataset = new_ds
-        trainer._train_dataloader = None  # noqa: SLF001 — HF Trainer cache invalidation
-        if getattr(trainer, "sampler", None) is not None:
-            trainer.sampler = None
+
+        if step % self.plot_every != 0:
+            return control
+
+        self._run_plot_synchronized(trainer, state, triggered_from="on_save")
         return control
 
 
-class ReloadTrainDatasetEachEpochCallback(TrainerCallback):
-    """Reload train dataset at the start of each epoch (fallback if step-wise reload is brittle)."""
-
-    def __init__(self, rebuild_train_fn: Callable[[int], object]) -> None:
-        super().__init__()
-        self.rebuild_train_fn = rebuild_train_fn
-        self.trainer = None
-
-    def on_epoch_begin(self, args, state: TrainerState, control: TrainerControl, **kwargs):
-        trainer = self.trainer
-        if trainer is None:
-            return control
-        new_ds = self.rebuild_train_fn(int(state.global_step))
-        fmt = getattr(trainer, "_sft_formatting_func", None)
-        if hasattr(trainer, "_prepare_dataset"):
-            new_ds = trainer._prepare_dataset(
-                new_ds,
-                trainer.processing_class,
-                trainer.args,
-                trainer.args.packing,
-                fmt,
-                "train",
-            )
-        trainer.train_dataset = new_ds
-        trainer._train_dataloader = None  # noqa: SLF001
-        return control
-
-
-def save_eval_state(path: Path, seed: int, eval_n: int, eval_hashes: list[str]) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    payload = {"seed": seed, "eval_num_examples": eval_n, "eval_hashes": eval_hashes}
-    path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
-
-
-def load_eval_state(path: Path) -> dict | None:
-    if not path.exists():
-        return None
-    return json.loads(path.read_text(encoding="utf-8"))
+# Backwards-compatible name for older docs / forks.
+StatisticsPlotCallback = TrainingLossPlotCallback
 
 
 def latest_checkpoint_dir(output_dir: Path) -> str | None:
