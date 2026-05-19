@@ -113,7 +113,14 @@ def parse_args():
         action="store_true",
         help="Write checkpoint-latest as a symlink (default: one-line pointer file — reliable on NFS/deepfreeze)",
     )
-    p.add_argument("--logging-steps", type=int, default=10)
+    p.add_argument(
+        "--logging-steps",
+        type=int,
+        default=10,
+        help="Trainer log interval; should divide --plot-every so PDF refresh runs on a logged step. "
+        "Also align --loss-csv-every (e.g. divide --plot-every) so training_loss_history.csv has a row "
+        "at each plot boundary (statistics.pdf panel 3).",
+    )
     p.add_argument(
         "--loss-csv-every",
         type=int,
