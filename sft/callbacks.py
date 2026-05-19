@@ -121,10 +121,10 @@ class TrainingLossPlotCallback(TrainerCallback):
     Does **not** call ``trainer.evaluate()`` during training (DDP / NCCL fragile at scale). For
     leaderboard scores use ``inference/infer.py`` + ``inference/evaluate.py``.
 
-    Refreshes every ``plot_every`` global steps (``--plot-every``). PDF: sparse metrics (loss +
-    token accuracy), dense loss from ``training_loss_history.csv`` when present.
+    Refreshes every ``plot_every`` global steps (``--plot-every``). Updates run from ``on_log`` (after
+    ``TrainLossHistoryCallback`` writes ``training_loss_history.csv``) except when a plot step coincides
+    with ``save_steps`` — then work runs in ``on_save`` after logging and checkpoint I/O.
 
-    When a plot step coincides with ``save_steps``, CSV update runs in ``on_save`` (after checkpoint).
     Under DDP, non-zero ranks barrier only around rank 0 appending ``metrics_history.csv``; PDF rendering
     runs in a background thread on rank 0 so tqdm / the training loop are not blocked by matplotlib.
     """
@@ -282,18 +282,19 @@ class TrainingLossPlotCallback(TrainerCallback):
         fig.savefig(self.pdf_path, format="pdf", bbox_inches="tight")
         plt.close(fig)
 
-    def on_step_end(self, args, state: TrainerState, control: TrainerControl, **kwargs):
+    def on_log(self, args, state: TrainerState, control: TrainerControl, logs=None, **kwargs):
+        """Plot after logging so ``training_loss_history.csv`` already includes this step."""
         trainer = self.trainer
         if trainer is None:
             return control
-        step = int(state.global_step)
-        if step <= 0:
+        if logs is None or "loss" not in logs:
             return control
-
-        if step % self.plot_every == 0:
-            if self._checkpoint_save_this_step(args, step):
-                return control
-            self._run_plot_synchronized(trainer, state, triggered_from="on_step_end")
+        step = int(state.global_step)
+        if step <= 0 or step % self.plot_every != 0:
+            return control
+        if self._checkpoint_save_this_step(args, step):
+            return control
+        self._run_plot_synchronized(trainer, state, triggered_from="on_log")
         return control
 
     def on_save(self, args, state: TrainerState, control: TrainerControl, **kwargs):
