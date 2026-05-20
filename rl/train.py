@@ -205,7 +205,7 @@ def parse_args():
     p.add_argument(
         "--plot-every",
         type=int,
-        default=250,
+        default=10,
         help="Steps between metrics_history.csv + statistics.pdf refresh (loss + reward)",
     )
     p.add_argument(
@@ -239,7 +239,7 @@ def parse_args():
     p.add_argument("--lr", type=float, default=2e-5)
     p.add_argument("--max-steps", type=int, default=-1)
     p.add_argument("--epochs", type=float, default=5.0)
-    p.add_argument("--save-every", type=int, default=250, help="Checkpoint save interval (steps); tqdm segments align")
+    p.add_argument("--save-every", type=int, default=50, help="Checkpoint save interval (steps); tqdm segments align")
     p.add_argument("--save-total-limit", type=int, default=5)
     p.add_argument(
         "--checkpoint-latest-symlink",
