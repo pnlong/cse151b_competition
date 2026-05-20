@@ -6,8 +6,10 @@ Starts from an SFT LoRA directory (or a full HF model id). Prompts match
 ``inference/infer.py`` via ``build_prompt`` + ``apply_chat_template_safe``.
 
 Progress + checkpoint cadence mirror ``sft/train.py``: segmented tqdm (aligned to
-``--save-every``), ``checkpoint-latest`` (pointer file or symlink), resume, and matching LR /
-batch / epoch / warmup / save defaults unless overridden.
+``--save-every``), ``checkpoint-latest`` (pointer file or symlink), resume, training
+curves (``training_loss_history.csv`` every ``--loss-csv-every`` steps;
+``metrics_history.csv`` + ``statistics.pdf`` every ``--plot-every`` steps), and
+matching LR / batch / epoch / warmup / save defaults unless overridden.
 """
 
 from __future__ import annotations
@@ -19,6 +21,12 @@ import os
 import sys
 import warnings
 from pathlib import Path
+
+warnings.filterwarnings(
+    "ignore",
+    message=r"TRL currently supports vLLM versions.*",
+    category=UserWarning,
+)
 
 _REPO_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(_REPO_ROOT))
@@ -48,6 +56,7 @@ from transformers.trainer_utils import get_last_checkpoint  # noqa: E402
 from trl import GRPOConfig, GRPOTrainer  # noqa: E402
 
 from constants import (  # noqa: E402
+    DEFAULT_MAX_SEQ_LEN,
     DEFAULT_MODEL,
     DEFAULT_TEMPERATURE,
     DEFAULT_TOP_P,
@@ -57,7 +66,8 @@ from constants import (  # noqa: E402
 )
 from config import CHECKPOINTS_DIR, PUBLIC_DATA, ensure_storage_dirs  # noqa: E402
 from inference.utils import apply_chat_template_safe, build_prompt, load_jsonl  # noqa: E402
-from rl.rewards import JudgerOutcomeReward  # noqa: E402
+from rl.callbacks import GrpoTrainingPlotCallback, GrpoTrainHistoryCallback  # noqa: E402
+from rl.rewards import JudgerOutcomeReward, normalize_gold_answer  # noqa: E402
 from sft.progress_callbacks import (
     LatestCheckpointSymlinkCallback,
     install_checkpoint_chunk_progress_bar,
@@ -93,7 +103,7 @@ def resolve_base_and_adapter(model_path: Path) -> tuple[str, str | None]:
 
 def build_grpo_dataset(tokenizer, jsonl_path: Path) -> Dataset:
     """
-    Rows: ``prompt`` (string), ``is_mcq``, ``gold`` (raw answer field), ``id``.
+    Rows: ``prompt`` (string), ``is_mcq``, ``gold`` (list of answer strings), ``id``.
     """
     records: list[dict] = []
     for item in load_jsonl(jsonl_path):
@@ -113,7 +123,7 @@ def build_grpo_dataset(tokenizer, jsonl_path: Path) -> Dataset:
             {
                 "prompt": prompt,
                 "is_mcq": bool(item.get("options")),
-                "gold": item["answer"],
+                "gold": normalize_gold_answer(item["answer"]),
                 "id": item.get("id"),
             }
         )
@@ -192,12 +202,33 @@ def parse_args():
     )
     p.add_argument("--seed", type=int, default=42)
 
+    p.add_argument(
+        "--plot-every",
+        type=int,
+        default=250,
+        help="Steps between metrics_history.csv + statistics.pdf refresh (loss + reward)",
+    )
+    p.add_argument(
+        "--logging-steps",
+        type=int,
+        default=10,
+        help="Trainer log interval; should divide --plot-every so PDF refresh runs on a logged step. "
+        "Also align --loss-csv-every with this for dense training_loss_history.csv rows.",
+    )
+    p.add_argument(
+        "--loss-csv-every",
+        type=int,
+        default=10,
+        help="Append training_loss_history.csv every N global steps when Trainer logs loss "
+        "(includes reward / kl / entropy when TRL logs them). Set to 0 to disable.",
+    )
+
     p.add_argument("--num-generations", type=int, default=4, help="K completions per prompt (GRPO group size)")
     p.add_argument(
         "--max-completion-length",
         type=int,
-        default=4096,
-        help="Max new tokens per rollout (default matches SFT --max-seq-length)",
+        default=DEFAULT_MAX_SEQ_LEN,
+        help=f"Max new tokens per rollout (default: constants.DEFAULT_MAX_SEQ_LEN = {DEFAULT_MAX_SEQ_LEN})",
     )
     p.add_argument("--temperature", type=float, default=DEFAULT_TEMPERATURE)
     p.add_argument("--top-p", type=float, default=DEFAULT_TOP_P)
@@ -208,7 +239,6 @@ def parse_args():
     p.add_argument("--lr", type=float, default=2e-5)
     p.add_argument("--max-steps", type=int, default=-1)
     p.add_argument("--epochs", type=float, default=5.0)
-    p.add_argument("--logging-steps", type=int, default=10)
     p.add_argument("--save-every", type=int, default=250, help="Checkpoint save interval (steps); tqdm segments align")
     p.add_argument("--save-total-limit", type=int, default=5)
     p.add_argument(
@@ -409,10 +439,19 @@ def main():
     reward_fn = JudgerOutcomeReward(format_bonus=args.format_bonus)
     best_cb = BestRewardCallback(metric_key="reward")
 
-    callbacks = [
+    callbacks: list[TrainerCallback] = [
+        GrpoTrainingPlotCallback(
+            output_dir=output_dir,
+            plot_every=args.plot_every,
+        ),
         LatestCheckpointSymlinkCallback(use_symlink=args.checkpoint_latest_symlink),
         best_cb,
     ]
+    if int(args.loss_csv_every) > 0:
+        callbacks.insert(
+            0,
+            GrpoTrainHistoryCallback(output_dir=output_dir, every=int(args.loss_csv_every)),
+        )
 
     trainer = GRPOTrainer(
         model=model,
@@ -422,6 +461,9 @@ def main():
         processing_class=tokenizer,
         callbacks=callbacks,
     )
+    for cb in callbacks:
+        if hasattr(cb, "trainer"):
+            cb.trainer = trainer
     best_cb.trainer = trainer
 
     install_checkpoint_chunk_progress_bar(trainer)

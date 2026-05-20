@@ -16,10 +16,29 @@ from constants import BOXED_CMD
 from inference.utils import score_mcq
 
 
+def normalize_gold_answer(answer: Any) -> list:
+    """Normalize public-set answers to a list for Arrow / HuggingFace datasets.
+
+    ``public.jsonl`` mixes MCQ strings (``\"F\"``) and multi-blank lists (``[\"a\", \"b\"]``).
+    PyArrow rejects a single column with both scalars and lists; always store a list.
+    """
+    if isinstance(answer, list):
+        return answer
+    return [answer]
+
+
 def _as_gold_list(gold: Any) -> list:
     if isinstance(gold, list):
         return gold
     return [gold]
+
+
+def _mcq_gold_letter(gold: Any) -> str:
+    """Extract the gold MCQ letter whether *gold* is stored as str or single-item list."""
+    items = _as_gold_list(gold)
+    if not items:
+        return ""
+    return str(items[0])
 
 
 def _norm_gold_list(judger: Judger, gold: Any) -> list[str]:
@@ -74,7 +93,7 @@ class JudgerOutcomeReward:
         for completion, mcq, g in zip(completions, is_mcq, gold):
             try:
                 if bool(mcq):
-                    r = 1.0 if score_mcq(completion, str(g)) else 0.0
+                    r = 1.0 if score_mcq(completion, _mcq_gold_letter(g)) else 0.0
                 else:
                     r = _freeform_reward(self._judger, completion, g)
             except Exception:

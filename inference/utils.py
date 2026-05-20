@@ -37,10 +37,32 @@ __all__ = [
     "build_prompt", "apply_chat_template_safe", "tokenizer_chat_template_debug",
     "model_id_is_deepseek_r1_distill", "is_deepseek_r1_vllm_special_case",
     "load_jsonl", "save_jsonl", "save_submission_csv", "save_results_jsonl",
+    "normalize_model_ref", "is_huggingface_hub_id",
 ]
 
 
-# ── \\boxed{} extraction ───────────────────────────────────────────────────────
+def is_huggingface_hub_id(model: str) -> bool:
+    """True for ids like ``Qwen/Qwen3-4B-Thinking-2507`` (not local paths)."""
+    s = model.strip()
+    if not s or s.startswith(("/", "./", "../")):
+        return False
+    if s.startswith("~"):
+        return False
+    p = Path(s)
+    if p.is_absolute() or p.exists():
+        return False
+    return "/" in s
+
+
+def normalize_model_ref(model: Path | str) -> str:
+    """Return a HuggingFace hub id or an absolute local model directory path."""
+    raw = str(model).strip()
+    if is_huggingface_hub_id(raw):
+        return raw
+    p = Path(raw).expanduser()
+    if p.exists() or p.is_absolute():
+        return str(p.resolve())
+    return str(p.resolve())
 
 def extract_last_boxed(text: str) -> Optional[str]:
     """

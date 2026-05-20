@@ -46,8 +46,9 @@ STORAGE_DIR = Path(os.environ.get("STORAGE_DIR", _HERE / "storage"))
 # ── Data (always inside the repo root) ────────────────────────────────────────
 
 DATA_DIR      = ROOT_DIR / "data"
-PRIVATE_DATA  = DATA_DIR / "private.jsonl"   # private test set (no answers)
-PUBLIC_DATA   = DATA_DIR / "public.jsonl"    # public set (with answers)
+PRIVATE_DATA      = DATA_DIR / "private.jsonl"       # private test set (no answers)
+PRIVATE_OLD_DATA  = DATA_DIR / "private.old.jsonl" # previous private split (id remap)
+PUBLIC_DATA       = DATA_DIR / "public.jsonl"        # public set (with answers)
 
 # ── Storage sub-directories ────────────────────────────────────────────────────
 # These live on the storage node and are created on first access.

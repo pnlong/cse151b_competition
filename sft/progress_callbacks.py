@@ -7,6 +7,7 @@ Used by ``sft/train.py`` and ``rl/train.py`` so RL does not import SFT plot call
 from __future__ import annotations
 
 import csv
+import json
 import os
 from pathlib import Path
 
@@ -14,6 +15,8 @@ from tqdm.auto import tqdm
 from transformers import TrainerCallback, TrainerControl, TrainerState
 from transformers.trainer_callback import ProgressCallback
 from transformers.trainer_utils import PREFIX_CHECKPOINT_DIR
+
+from inference.utils import is_huggingface_hub_id, normalize_model_ref
 
 CHECKPOINT_LATEST = "checkpoint-latest"
 TRAINING_LOSS_HISTORY_CSV = "training_loss_history.csv"
@@ -55,6 +58,35 @@ def resolve_checkpoint_latest_path(path: Path | str) -> Path:
             if cand.is_dir():
                 return cand
     return p
+
+
+def resolve_base_and_adapter(model_path: Path | str) -> tuple[str, str | None]:
+    """If *model_path* is a PEFT adapter dir, return (base_model, adapter_dir).
+
+    Otherwise return (hub id or local path, None).
+    """
+    raw = str(model_path).strip()
+    if is_huggingface_hub_id(raw):
+        return raw, None
+
+    p = Path(raw).expanduser().resolve()
+    adapter_cfg = p / "adapter_config.json"
+    if adapter_cfg.is_file():
+        meta = json.loads(adapter_cfg.read_text(encoding="utf-8"))
+        base = meta.get("base_model_name_or_path")
+        if not base:
+            raise ValueError(
+                f"adapter_config.json missing base_model_name_or_path: {adapter_cfg}"
+            )
+        return str(base), str(p)
+    return normalize_model_ref(model_path), None
+
+
+def adapter_lora_rank(adapter_dir: Path | str) -> int:
+    """Read LoRA rank ``r`` from a PEFT adapter directory."""
+    adapter_cfg = Path(adapter_dir) / "adapter_config.json"
+    meta = json.loads(adapter_cfg.read_text(encoding="utf-8"))
+    return int(meta.get("r", 16))
 
 
 _TRAIN_LOSS_CSV_FIELDS = ("global_step", "train_loss", "learning_rate", "mean_token_accuracy")

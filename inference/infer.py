@@ -48,6 +48,7 @@ if HF_XET_CACHE:
 from tqdm import tqdm
 from transformers import AutoTokenizer
 from vllm import LLM, SamplingParams
+from vllm.lora.request import LoRARequest
 
 from constants import (
     DEFAULT_MODEL,
@@ -69,7 +70,11 @@ from constants import (
     MULTI_ANS_NOTE,
 )
 from config import PRIVATE_DATA, RESULTS_DIR, HF_CACHE_DIR
-from sft.progress_callbacks import resolve_checkpoint_latest_path
+from sft.progress_callbacks import (
+    adapter_lora_rank,
+    resolve_base_and_adapter,
+    resolve_checkpoint_latest_path,
+)
 from inference.utils import (
     load_jsonl,
     build_prompt,
@@ -77,6 +82,7 @@ from inference.utils import (
     count_ans_slots,
     majority_vote,
     is_deepseek_r1_vllm_special_case,
+    normalize_model_ref,
 )
 
 
@@ -166,9 +172,17 @@ def append_rows(rows: list[dict], out_path: Path, write_header: bool) -> None:
 
 def main():
     args = parse_args()
-    _mp = resolve_checkpoint_latest_path(Path(args.model))
-    if _mp.is_dir():
-        args.model = str(_mp.resolve())
+    model_path = resolve_checkpoint_latest_path(Path(args.model))
+    base_id, adapter_dir = resolve_base_and_adapter(model_path)
+    vllm_model = base_id if adapter_dir else normalize_model_ref(model_path)
+    lora_request: LoRARequest | None = None
+    if adapter_dir:
+        lora_request = LoRARequest("sft_adapter", 1, adapter_dir)
+    model_label = (
+        f"{base_id} + LoRA ({Path(adapter_dir).name})"
+        if adapter_dir
+        else vllm_model
+    )
     # When infer_parallel.py runs workers, it sets INFER_PARALLEL_WORKER=1 so tqdm/log
     # output is plain print (full logs go to per-shard *.log files).
     _parallel_worker = os.environ.get("INFER_PARALLEL_WORKER", "").lower() in (
@@ -200,7 +214,7 @@ def main():
     print(f"\n{'='*55}")
     print(f"  Data   : {args.data}")
     print(f"  Output : {out_path}")
-    print(f"  Model  : {args.model}")
+    print(f"  Model  : {model_label}")
     device_str = f"GPU (tp={args.tp}, gpu_util={gpu_util:.0%}" + (", INT8 quantized" if args.quantize else "") + ")" if args.gpu else "CPU"
     print(f"  Device : {device_str}")
     if args.num_shards > 1:
@@ -217,8 +231,12 @@ def main():
         return
 
     # ── Tokenizer ─────────────────────────────────────────────────────────────
-    print(f"[1/3] Loading tokenizer ({args.model})...")
-    tokenizer = AutoTokenizer.from_pretrained(args.model, trust_remote_code=True)
+    tok_source = adapter_dir or vllm_model
+    print(f"[1/3] Loading tokenizer ({tok_source})...")
+    try:
+        tokenizer = AutoTokenizer.from_pretrained(tok_source, trust_remote_code=True)
+    except OSError:
+        tokenizer = AutoTokenizer.from_pretrained(vllm_model, trust_remote_code=True)
     tokenizer.pad_token = tokenizer.eos_token
     print(f"      Tokenizer ready.")
 
@@ -243,12 +261,16 @@ def main():
     print(f"[2/3] Loading model weights into {'GPU' if args.gpu else 'CPU'} memory...")
     print(f"      (Note: first run may take several extra minutes for torch compilation)")
     llm_kwargs = dict(
-        model=args.model,
+        model=vllm_model,
         trust_remote_code=True,
         max_model_len=args.max_seq_len,
         max_num_seqs=DEFAULT_MAX_NUM_SEQS,
         max_num_batched_tokens=DEFAULT_MAX_NUM_BATCHED_TOKENS,
     )
+    if adapter_dir:
+        llm_kwargs["enable_lora"] = True
+        llm_kwargs["max_lora_rank"] = adapter_lora_rank(adapter_dir)
+        print(f"      LoRA adapter: {adapter_dir} (rank={llm_kwargs['max_lora_rank']})")
     if args.gpu:
         llm_kwargs["tensor_parallel_size"]   = args.tp
         llm_kwargs["gpu_memory_utilization"] = gpu_util
@@ -259,12 +281,12 @@ def main():
     else:
         llm_kwargs["device"] = "cpu"
 
-    if is_deepseek_r1_vllm_special_case(tokenizer, args.model):
+    if is_deepseek_r1_vllm_special_case(tokenizer, vllm_model):
         llm_kwargs["enforce_eager"] = True
 
     llm = LLM(**llm_kwargs)
     print(f"      Model ready.")
-    if is_deepseek_r1_vllm_special_case(tokenizer, args.model):
+    if is_deepseek_r1_vllm_special_case(tokenizer, vllm_model):
         print("      [vllm] DeepSeek-R1: string prompts + enforce_eager=True "
               "(vLLM CUDA-graph / compile glitches on this family).")
 
@@ -293,7 +315,7 @@ def main():
 
         # Pre-tokenize once per unique prompt (avoids vLLM re-tokenising N copies),
         # except DeepSeek-R1 / Distill: use string prompts so vLLM tokenization matches.
-        use_str = is_deepseek_r1_vllm_special_case(tokenizer, args.model)
+        use_str = is_deepseek_r1_vllm_special_case(tokenizer, vllm_model)
         chunk_inputs: list[dict] = []
         if router is None:
             for item in chunk:
@@ -328,7 +350,11 @@ def main():
                     })
 
         all_prompts = [dict(inp) for inp in chunk_inputs for _ in range(N)]
-        outputs     = llm.generate(all_prompts, sampling_params=sampling_params)
+        outputs     = llm.generate(
+            all_prompts,
+            sampling_params=sampling_params,
+            lora_request=lora_request,
+        )
         flat_resps  = [out.outputs[0].text.strip() for out in outputs]
 
         rows = []

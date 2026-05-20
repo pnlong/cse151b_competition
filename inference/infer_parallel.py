@@ -6,6 +6,9 @@ GPU count is inferred from CUDA_VISIBLE_DEVICES (comma-separated physical IDs). 
 variable is unset, every CUDA device reported by PyTorch is used (device indices 0..N-1).
 
 Multi-GPU behaviour:
+  - Before sharding, collects completed question ids from the merged ``--output`` CSV and
+    any existing ``*.shardK.csv`` files, then splits **only the remaining** questions
+    across workers (round-robin). Each worker gets a small ``*.shardK.todo.jsonl`` subset.
   - Each shard writes full logs to ``<output-stem>.shard<K>.log`` (next to the CSV shards).
   - This driver prints a single periodic summary line on the terminal (CSV rows completed
     per shard vs quota), avoiding interleaved tqdm from multiple workers.
@@ -16,9 +19,9 @@ Examples:
     CUDA_VISIBLE_DEVICES=0,1,2 python inference/infer_parallel.py --gpu
     python inference/infer_parallel.py --gpu --data data/public.jsonl --output results/out.csv
 
-Any arguments are forwarded to infer.py except --tp / --num-shards / --shard-id / --output,
-which this driver sets per worker. The merged file is written to the path implied by
---output (default: same as infer.py).
+Any arguments are forwarded to infer.py except --tp / --num-shards / --shard-id / --output
+/ --data, which this driver sets per worker. The merged file is written to the path implied
+by --output (default: same as infer.py).
 """
 
 from __future__ import annotations
@@ -36,7 +39,7 @@ if str(_REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(_REPO_ROOT))
 
 from config import PRIVATE_DATA, RESULTS_DIR  # noqa: E402
-from inference.utils import load_jsonl  # noqa: E402
+from inference.utils import load_jsonl, save_jsonl  # noqa: E402
 
 _INFER_SCRIPT = Path(__file__).resolve().parent / "infer.py"
 
@@ -44,7 +47,7 @@ _INFER_SCRIPT = Path(__file__).resolve().parent / "infer.py"
 _PROGRESS_INTERVAL_SEC = 30 * 60  # 30 minutes
 
 # Flags whose values this driver strips from the forwarded argv and rewrites per worker.
-_STRIP_VALUE_FLAGS = frozenset({"--tp", "--num-shards", "--shard-id", "--output"})
+_STRIP_VALUE_FLAGS = frozenset({"--tp", "--num-shards", "--shard-id", "--output", "--data"})
 
 
 def _get_flag_value(argv: list[str], name: str) -> str | None:
@@ -55,6 +58,10 @@ def _get_flag_value(argv: list[str], name: str) -> str | None:
         if a.startswith(prefix):
             return a[len(prefix) :]
     return None
+
+
+def _has_flag(argv: list[str], name: str) -> bool:
+    return name in argv or any(a.startswith(f"{name}=") for a in argv)
 
 
 def _strip_value_flags(argv: list[str], flags: frozenset[str]) -> list[str]:
@@ -101,6 +108,10 @@ def _shard_path(final: Path, shard_id: int) -> Path:
     return final.parent / f"{final.stem}.shard{shard_id}{final.suffix}"
 
 
+def _shard_todo_path(final: Path, shard_id: int) -> Path:
+    return final.parent / f"{final.stem}.shard{shard_id}.todo.jsonl"
+
+
 def _shard_log_path(final: Path, shard_id: int) -> Path:
     """Plain-text log for one worker (same basename as shard CSV, ``.log`` suffix)."""
     return final.parent / f"{final.stem}.shard{shard_id}.log"
@@ -123,52 +134,87 @@ def _csv_body_row_count(path: Path) -> int:
         return sum(1 for _ in reader)
 
 
-def _per_shard_quotas(data_path: Path, limit: int | None, num_shards: int) -> list[int]:
+def _load_csv_responses(path: Path) -> dict[str, str]:
+    if not path.exists():
+        return {}
+    with open(path, newline="", encoding="utf-8") as f:
+        return {str(row["id"]): row["response"] for row in csv.DictReader(f)}
+
+
+def _load_dataset_rows(data_path: Path, limit: int | None) -> list[dict]:
     rows = load_jsonl(data_path)
     if limit is not None:
         rows = rows[:limit]
-    counts = [0] * num_shards
-    for i in range(len(rows)):
-        counts[i % num_shards] += 1
-    return counts
+    return rows
 
 
 def _ordered_question_ids(data_path: Path, limit: int | None) -> list[str]:
-    rows = load_jsonl(data_path)
-    if limit is not None:
-        rows = rows[:limit]
-    return [str(r["id"]) for r in rows]
+    return [str(r["id"]) for r in _load_dataset_rows(data_path, limit)]
 
 
-def _merge_shards(final_csv: Path, shard_paths: list[Path], ordered_ids: list[str]) -> None:
-    merged: dict[str, str] = {}
+def _collect_done_responses(
+    final_csv: Path,
+    shard_paths: list[Path],
+    *,
+    reset: bool,
+) -> dict[str, str]:
+    """Union completed rows from merged output and shard CSVs (unless --reset)."""
+    if reset:
+        return {}
+    done = _load_csv_responses(final_csv)
     for sp in shard_paths:
-        if not sp.exists():
-            continue
-        with open(sp, newline="") as f:
-            for row in csv.DictReader(f):
-                merged[str(row["id"])] = row["response"]
+        done.update(_load_csv_responses(sp))
+    return done
 
-    missing = [qid for qid in ordered_ids if qid not in merged]
+
+def _split_todo_rows(
+    rows: list[dict],
+    done_ids: set[str],
+    num_shards: int,
+) -> tuple[list[list[dict]], list[int]]:
+    """Round-robin split of dataset rows not yet in *done_ids*."""
+    todo = [row for row in rows if str(row["id"]) not in done_ids]
+    shard_rows: list[list[dict]] = [[] for _ in range(num_shards)]
+    for i, row in enumerate(todo):
+        shard_rows[i % num_shards].append(row)
+    quotas = [len(s) for s in shard_rows]
+    return shard_rows, quotas
+
+
+def _write_final_csv(final_csv: Path, ordered_ids: list[str], responses: dict[str, str]) -> None:
+    missing = [qid for qid in ordered_ids if qid not in responses]
     if missing:
         raise SystemExit(
-            f"Merge failed: {len(missing)} question ids missing from shard CSVs "
+            f"Merge failed: {len(missing)} question ids missing "
             f"(showing up to 5): {missing[:5]}"
         )
-
-    extras = set(merged.keys()) - set(ordered_ids)
-    if extras:
-        raise SystemExit(
-            f"Merge failed: shard CSVs contain unexpected ids (showing up to 5): "
-            f"{sorted(extras)[:5]}"
-        )
-
     final_csv.parent.mkdir(parents=True, exist_ok=True)
-    with open(final_csv, "w", newline="") as f:
+    with open(final_csv, "w", newline="", encoding="utf-8") as f:
         w = csv.DictWriter(f, fieldnames=["id", "response"])
         w.writeheader()
         for qid in ordered_ids:
-            w.writerow({"id": qid, "response": merged[qid]})
+            w.writerow({"id": qid, "response": responses[qid]})
+
+
+def _merge_results(
+    final_csv: Path,
+    shard_paths: list[Path],
+    ordered_ids: list[str],
+    preload: dict[str, str],
+) -> None:
+    merged = dict(preload)
+    for sp in shard_paths:
+        merged.update(_load_csv_responses(sp))
+
+    extras = set(merged.keys()) - set(ordered_ids)
+    if extras:
+        preview = sorted(extras)[:5]
+        print(
+            f"[infer_parallel] warning: ignoring {len(extras)} id(s) not in dataset "
+            f"(showing up to 5): {preview}"
+        )
+
+    _write_final_csv(final_csv, ordered_ids, merged)
 
 
 def _ensure_gpu_flag(forward: list[str]) -> list[str]:
@@ -182,11 +228,10 @@ def _spawn_workers(
     devices: list[str],
     forward_argv: list[str],
     final_output: Path,
-    data_path: Path,
-    limit: int | None,
+    shard_todos: list[list[dict]],
+    quotas: list[int],
 ) -> list[int]:
     n = len(devices)
-    quotas = _per_shard_quotas(data_path, limit, n)
     procs: list[subprocess.Popen] = []
     log_files: list[object] = []
 
@@ -216,6 +261,9 @@ def _spawn_workers(
 
     try:
         for shard_id, phys in enumerate(devices):
+            todo_path = _shard_todo_path(final_output, shard_id)
+            save_jsonl(shard_todos[shard_id], todo_path)
+
             env = os.environ.copy()
             env["CUDA_VISIBLE_DEVICES"] = phys
             env["PYTHONUNBUFFERED"] = "1"
@@ -225,12 +273,14 @@ def _spawn_workers(
             log_files.append(log_fp)
             child_argv = [
                 *forward_argv,
+                "--data",
+                str(todo_path),
                 "--tp",
                 "1",
                 "--num-shards",
-                str(n),
+                "1",
                 "--shard-id",
-                str(shard_id),
+                "0",
                 "--output",
                 str(out_shard),
             ]
@@ -282,6 +332,7 @@ def main() -> None:
     data_path = Path(data_s) if data_s else PRIVATE_DATA
     lim_s = _get_flag_value(argv, "--limit")
     limit = int(lim_s) if lim_s is not None else None
+    reset = _has_flag(argv, "--reset")
 
     forward_base = _strip_value_flags(argv, _STRIP_VALUE_FLAGS)
 
@@ -295,20 +346,41 @@ def main() -> None:
 
     forward_base = _ensure_gpu_flag(forward_base)
 
-    print(f"[infer_parallel] {len(devices)} GPUs → data-parallel shards; merge → {final_out}")
+    n = len(devices)
+    shard_paths = [_shard_path(final_out, k) for k in range(n)]
+    dataset_rows = _load_dataset_rows(data_path, limit)
+    ordered_ids = [str(r["id"]) for r in dataset_rows]
+    preload = _collect_done_responses(final_out, shard_paths, reset=reset)
+    done_ids = set(preload)
+    shard_todos, quotas = _split_todo_rows(dataset_rows, done_ids, n)
+    remaining = sum(quotas)
+
+    print(f"[infer_parallel] {n} GPUs → data-parallel shards; merge → {final_out}")
+    print(
+        f"[infer_parallel] progress: {len(done_ids)}/{len(ordered_ids)} already done; "
+        f"{remaining} remaining"
+        + (" (--reset)" if reset else " (merged CSV + shard CSVs)")
+    )
+    if remaining:
+        print(f"[infer_parallel] shard quotas: {quotas}")
+
+    if remaining == 0:
+        print("[infer_parallel] nothing to generate — writing merged CSV from existing results")
+        _merge_results(final_out, shard_paths, ordered_ids, preload)
+        print(f"[infer_parallel] Merged {len(ordered_ids)} rows → {final_out}")
+        return
+
     codes = _spawn_workers(
         devices=devices,
         forward_argv=forward_base,
         final_output=final_out,
-        data_path=data_path,
-        limit=limit,
+        shard_todos=shard_todos,
+        quotas=quotas,
     )
     if any(c != 0 for c in codes):
         raise SystemExit(f"One or more shard workers failed (exit codes={codes}).")
 
-    ordered_ids = _ordered_question_ids(data_path, limit)
-    shard_paths = [_shard_path(final_out, k) for k in range(len(devices))]
-    _merge_shards(final_out, shard_paths, ordered_ids)
+    _merge_results(final_out, shard_paths, ordered_ids, preload)
     print(f"[infer_parallel] Merged {len(ordered_ids)} rows → {final_out}")
 
 
