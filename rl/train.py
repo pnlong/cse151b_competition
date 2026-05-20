@@ -35,6 +35,7 @@ from config import HF_CACHE_DIR, HF_TOKEN, HF_XET_CACHE  # noqa: E402
 
 os.environ["HF_HOME"] = str(HF_CACHE_DIR)
 os.environ.setdefault("HF_HUB_DISABLE_XET", "1")
+os.environ.setdefault("PYTORCH_CUDA_ALLOC_CONF", "expandable_segments:True")
 if HF_TOKEN:
     os.environ.setdefault("HF_TOKEN", HF_TOKEN)
 if HF_XET_CACHE:
@@ -52,12 +53,14 @@ from transformers import (  # noqa: E402
     TrainerState,
     TrainingArguments,
 )
+from tqdm import tqdm  # noqa: E402
 from transformers.trainer_utils import get_last_checkpoint  # noqa: E402
 from trl import GRPOConfig, GRPOTrainer  # noqa: E402
 
 from constants import (  # noqa: E402
     DEFAULT_MAX_SEQ_LEN,
     DEFAULT_MODEL,
+    DEFAULT_RL_MAX_COMPLETION_LENGTH,
     DEFAULT_TEMPERATURE,
     DEFAULT_TOP_P,
     MULTI_ANS_NOTE,
@@ -84,6 +87,22 @@ def silence_known_third_party_warnings() -> None:
         message=r".*_check_is_size.*",
         category=FutureWarning,
     )
+
+
+def resolve_grpo_steps_per_generation(
+    *,
+    batch_size: int,
+    world_size: int,
+    steps_per_generation: int,
+    num_generations: int,
+) -> int:
+    """Bump steps_per_generation so TRL's generation_batch_size divides num_generations."""
+    micro = batch_size * max(1, world_size)
+    unit = num_generations // math.gcd(micro, num_generations)
+    resolved = max(steps_per_generation, unit)
+    if resolved % unit != 0:
+        resolved = math.ceil(resolved / unit) * unit
+    return resolved
 
 
 def resolve_base_and_adapter(model_path: Path) -> tuple[str, str | None]:
@@ -162,7 +181,7 @@ class BestRewardCallback(TrainerCallback):
             proc = getattr(self.trainer, "processing_class", None)
             if proc is not None:
                 proc.save_pretrained(str(out))
-            print(f"[best-reward] {self.metric_key}={val:.6f} → saved {out}", flush=True)
+            tqdm.write(f"[best-reward] {self.metric_key}={val:.6f} → saved {out}")
 
 
 def estimated_optimizer_steps(
@@ -205,30 +224,36 @@ def parse_args():
     p.add_argument(
         "--plot-every",
         type=int,
-        default=10,
+        default=1,
         help="Steps between metrics_history.csv + statistics.pdf refresh (loss + reward)",
     )
     p.add_argument(
         "--logging-steps",
         type=int,
-        default=10,
-        help="Trainer log interval; should divide --plot-every so PDF refresh runs on a logged step. "
-        "Also align --loss-csv-every with this for dense training_loss_history.csv rows.",
+        default=1,
+        help="Trainer log interval (every optimizer step by default). Should divide --plot-every.",
     )
     p.add_argument(
         "--loss-csv-every",
         type=int,
-        default=10,
-        help="Append training_loss_history.csv every N global steps when Trainer logs loss "
-        "(includes reward / kl / entropy when TRL logs them). Set to 0 to disable.",
+        default=1,
+        help="Append training_loss_history.csv every N logged steps (includes reward / kl / entropy). "
+        "Set to 0 to disable.",
     )
 
     p.add_argument("--num-generations", type=int, default=4, help="K completions per prompt (GRPO group size)")
     p.add_argument(
+        "--steps-per-generation",
+        type=int,
+        default=1,
+        help="Prompts batched per GRPO rollout phase (= per_device_batch × world_size × this). "
+        "Auto-bumped if needed so generation_batch_size divides --num-generations.",
+    )
+    p.add_argument(
         "--max-completion-length",
         type=int,
-        default=DEFAULT_MAX_SEQ_LEN,
-        help=f"Max new tokens per rollout (default: constants.DEFAULT_MAX_SEQ_LEN = {DEFAULT_MAX_SEQ_LEN})",
+        default=DEFAULT_RL_MAX_COMPLETION_LENGTH,
+        help=f"Max new tokens per rollout (default: {DEFAULT_RL_MAX_COMPLETION_LENGTH}; inference uses {DEFAULT_MAX_SEQ_LEN})",
     )
     p.add_argument("--temperature", type=float, default=DEFAULT_TEMPERATURE)
     p.add_argument("--top-p", type=float, default=DEFAULT_TOP_P)
@@ -361,6 +386,30 @@ def main():
         dataloader_workers = 4 if local_rank >= 0 else 0
     print(f"[train] dataloader_num_workers={dataloader_workers}")
 
+    steps_per_generation = resolve_grpo_steps_per_generation(
+        batch_size=args.batch_size,
+        world_size=world_size,
+        steps_per_generation=args.steps_per_generation,
+        num_generations=args.num_generations,
+    )
+    if steps_per_generation != args.steps_per_generation:
+        print(
+            f"[train] steps_per_generation {args.steps_per_generation} → {steps_per_generation} "
+            f"(TRL requires generation_batch_size divisible by num_generations={args.num_generations})",
+        )
+
+    gen_batch = args.batch_size * max(1, world_size) * steps_per_generation
+    approx_rollout_tokens = gen_batch * args.num_generations * args.max_completion_length
+    print(
+        f"[train] GRPO memory: steps_per_generation={steps_per_generation} → "
+        f"generation_batch_size≈{gen_batch}, "
+        f"num_generations={args.num_generations}, "
+        f"max_completion_length={args.max_completion_length} "
+        f"(≈{approx_rollout_tokens:,} completion-token slots per rollout phase). "
+        "If OOM: lower --max-completion-length and/or --num-generations, "
+        "or use a single GPU (--single-gpu).",
+    )
+
     if local_rank < 0 and torch.cuda.device_count() > 1 and not args.single_gpu:
         print(
             "[train] Multiple GPUs visible and device_map=\"auto\" will shard layers across them "
@@ -420,6 +469,7 @@ def main():
         gradient_checkpointing=True,
         report_to="none",
         num_generations=args.num_generations,
+        steps_per_generation=steps_per_generation,
         max_completion_length=args.max_completion_length,
         temperature=args.temperature,
         top_p=args.top_p,

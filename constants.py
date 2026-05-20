@@ -14,6 +14,7 @@ DEFAULT_MODEL = "Qwen/Qwen3-4B-Thinking-2507"
 DEFAULT_N_SAMPLES    = 4       # responses per question for self-consistency voting
 DEFAULT_MAX_TOKENS   = 8192    # max new tokens per response (thinking traces are long)
 DEFAULT_MAX_SEQ_LEN  = 8192    # vLLM max_model_len (prompt + generation); lower = more KV cache concurrency
+DEFAULT_RL_MAX_COMPLETION_LENGTH = 4096  # GRPO rollout cap (lower than inference — K×gen_batch×length in VRAM)
 DEFAULT_TEMPERATURE  = 0.6
 DEFAULT_TOP_P        = 0.95
 DEFAULT_TOP_K        = 20

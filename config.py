@@ -9,11 +9,28 @@ Usage:
 """
 
 import os
+import sys
 from pathlib import Path
 
 # ── Load .env ──────────────────────────────────────────────────────────────────
 
 _HERE = Path(__file__).parent   # repo root
+
+
+def _preload_env_libstdcxx() -> None:
+    """Load micromamba/conda libstdc++ before PyTorch.
+
+    scipy's HiGHS extension needs CXXABI_1.3.15; importing torch first can bind
+    the older system libstdc++ and break ``from scipy.optimize import …`` later.
+    """
+    import ctypes
+
+    lib = Path(sys.executable).resolve().parent.parent / "lib" / "libstdc++.so.6"
+    if lib.is_file():
+        ctypes.CDLL(str(lib))
+
+
+_preload_env_libstdcxx()
 
 try:
     from dotenv import load_dotenv
