@@ -43,6 +43,7 @@ import matplotlib.pyplot as plt
 import matplotlib.ticker as mticker
 import seaborn as sns
 
+from analysis.plot_style import AXIS_FS, TICK_FS, TITLE_FS, two_panel_figsize
 from topic_taxonomy import CANONICAL_TOPIC_ORDER
 from config import PUBLIC_DATA, PRIVATE_DATA
 from inference.router import RuleBasedRouter, primary_route
@@ -251,19 +252,12 @@ def plot(
     palette = sns.color_palette("muted", n_colors=len(plot_topics))
 
     n_bars = len(plot_topics)
-    # 3:1 aspect ratio (width = 3 × height)
-    fig_h = max(2.8, min(n_bars * 0.21, 8.2))
-    fig_w = 3.0 * fig_h
-
     fig, axes = plt.subplots(
         1, 2,
-        figsize=(fig_w, fig_h),
+        figsize=two_panel_figsize(n_bars=n_bars),
         sharey=True,
     )
 
-    _title_fs = 12
-    _axis_fs = 11
-    _tick_fs = 10
     _ann_fs = 10
 
     for ax, (result, split_name) in zip(
@@ -308,11 +302,11 @@ def plot(
                 va="center", ha="left", fontsize=_ann_fs,
             )
 
-        ax.set_title(f"{split_name}  (n = {n:,})", fontsize=_title_fs, fontweight="bold", pad=8)
-        ax.set_xlabel("Number of Problems", fontsize=_axis_fs)
-        ax.tick_params(axis="both", labelsize=_tick_fs)
+        ax.set_title(f"{split_name}  (n = {n:,})", fontsize=TITLE_FS, fontweight="bold", pad=8)
+        ax.set_xlabel("Number of Problems", fontsize=AXIS_FS)
+        ax.tick_params(axis="both", labelsize=TICK_FS)
 
-    axes[0].set_ylabel("Topic", fontsize=_axis_fs)
+    axes[0].set_ylabel("Topic", fontsize=AXIS_FS)
 
     fig.tight_layout()
 

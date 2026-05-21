@@ -16,7 +16,7 @@ Paths to the JSONL files come from [`config.py`](../config.py) (via `.env` → `
 | Script | Purpose |
 |--------|---------|
 | [`plot_dataset_breakdown.py`](plot_dataset_breakdown.py) | Summarizes **answer format** (MCQ vs free-form single vs multi-`[ANS]`) using `primary_route` on the JSONL fields. **Topic** bars come from either (**default**) the inference router’s `topic_taxonomy.classify_problem` label (same 20-way scoring as the CSV pipeline) via [`RuleBasedRouter`](../inference/router.py), or from **`--source csv`** reading [`data/topic_classifications.csv`](../data/topic_classifications.csv) (offline run of `classify_topics.py`). Prints tables to stdout and optionally saves a **two-panel horizontal bar chart**. |
-| [`plot_training_losses.py`](plot_training_losses.py) | Two-panel horizontal **SFT + GRPO training loss** figure from `training_loss_history.csv` under `STORAGE_DIR/checkpoints/` (defaults to `scratchpaper/figs/training_losses.pdf`). RL panel shows a placeholder until RL training logs exist. |
+| [`plot_sft_grpo_training.py`](plot_sft_grpo_training.py) | Two-panel **SFT loss + GRPO mean reward** figure from `training_loss_history.csv` under `STORAGE_DIR/checkpoints/` (defaults to `scratchpaper/figs/sft_grpo_training.pdf`). GRPO panel shows a placeholder until RL reward logs exist. |
 | [`classify_topics.py`](classify_topics.py) | Offline CLI: writes [`data/topic_classifications.csv`](../data/topic_classifications.csv) with columns `set`, `id`, `topic`. Scoring rules live in repo-root [`topic_taxonomy.py`](../topic_taxonomy.py). |
 
 ### `plot_dataset_breakdown.py`
@@ -38,19 +38,19 @@ micromamba run -n cse151b_competition python analysis/plot_dataset_breakdown.py 
     --source csv --classifications data/topic_classifications.csv
 ```
 
-### `plot_training_losses.py`
+### `plot_sft_grpo_training.py`
 
-- **`--sft-csv` / `--rl-csv`**: override checkpoint loss CSV paths (defaults: `STORAGE_DIR/checkpoints/sft|rl/training_loss_history.csv`).
-- **`--output`**: PDF path (default: `scratchpaper/figs/training_losses.pdf`).
+- **`--sft-csv` / `--rl-csv`**: override checkpoint history CSV paths (defaults: `STORAGE_DIR/checkpoints/sft|rl/training_loss_history.csv`).
+- **`--output`**: PDF path (default: `scratchpaper/figs/sft_grpo_training.pdf`).
 
 ```bash
 cd cse151b/final
-micromamba run -n cse151b_competition python analysis/plot_training_losses.py
-micromamba run -n cse151b_competition python analysis/plot_training_losses.py \
-    --output scratchpaper/figs/training_losses.pdf
+micromamba run -n cse151b_competition python analysis/plot_sft_grpo_training.py
+micromamba run -n cse151b_competition python analysis/plot_sft_grpo_training.py \
+    --output scratchpaper/figs/sft_grpo_training.pdf
 ```
 
-Re-run after GRPO training completes so the right panel includes RL loss data.
+Re-run after GRPO training progresses so the right panel includes reward data.
 
 ### `classify_topics.py`
 
@@ -70,7 +70,7 @@ micromamba run -n cse151b_competition python analysis/classify_topics.py \
 | Artifact | Produced by | Notes |
 |----------|-------------|-------|
 | `scratchpaper/figs/breakdown.pdf` | `plot_dataset_breakdown.py --output …` | Report topic/format figure. |
-| `scratchpaper/figs/training_losses.pdf` | `plot_training_losses.py --output …` | Report SFT/RL loss figure. |
+| `scratchpaper/figs/sft_grpo_training.pdf` | `plot_sft_grpo_training.py --output …` | Report SFT loss + GRPO reward figure. |
 | `analysis/breakdown_topics.pdf` (or similar) | `plot_dataset_breakdown.py --source csv --output …` | Optional CSV-mode breakdown. |
 | `data/topic_classifications.csv` | `classify_topics.py` | One row per problem: `public`/`private`, numeric `id`, single `topic` label. |
 
@@ -80,7 +80,7 @@ micromamba run -n cse151b_competition python analysis/classify_topics.py \
 
 - **Shared**: `matplotlib`, `seaborn`, project imports (`config`, `inference.router`, `topic_taxonomy`).
 - **`plot_dataset_breakdown.py`**: imports `CANONICAL_TOPIC_ORDER` from `topic_taxonomy` for topic label ordering.
-- **`plot_training_losses.py`**: `matplotlib`, `config.CHECKPOINTS_DIR`.
+- **`plot_sft_grpo_training.py`**: `matplotlib`, `seaborn`, `config.CHECKPOINTS_DIR`.
 - **`classify_topics.py`**: standard library + `topic_taxonomy`, `config`.
 
 If plotting fails, ensure matplotlib has a backend (e.g. use `--output` for non-interactive PDF/PNG on headless machines).
