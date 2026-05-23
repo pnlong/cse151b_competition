@@ -256,26 +256,67 @@ CUDA_VISIBLE_DEVICES=0,1 torchrun --standalone --nproc_per_node=2 sft/train.py \
 
 Run the SFT checkpoint on the public set and compare accuracy to the Experiment 1 baselines.
 
+Experiment 2 in the report (**Exp 2**) uses **`--use-router`** with $N = 4$: same inference recipe as **Exp 1d** (format + topic routing, self-consistency). Omitting **`--use-router`** is closer to **Exp 1c** ($N = 4$ without routing)—use separate output CSVs so the two setups are not conflated.
+
 **Relevant files**:
 - `inference/infer.py`
+- `inference/infer_parallel.py` — data-parallel throughput (recommended when multiple GPUs are available)
 - `inference/evaluate.py`
 - `config.py` — `CHECKPOINTS_DIR`
 
-**How to run**:
+**How to run** (adjust `CUDA_VISIBLE_DEVICES` and checkpoint paths):
+
+**With router (matches Exp 2 / Exp 1d recipe)** — data-parallel example:
+
 ```bash
-CUDA_VISIBLE_DEVICES=0 python inference/infer.py --gpu --quantize \
+CUDA_VISIBLE_DEVICES=0,3 python inference/infer_parallel.py --gpu --quantize \
     --model /deepfreeze/pnlong/school/cse151b/final/checkpoints/sft/checkpoint-latest \
-    --data data/public.jsonl \
     --n-samples 4 \
+    --data data/public.jsonl \
+    --use-router \
     --output /deepfreeze/pnlong/school/cse151b/final/results/public_sft_n4.csv
 
 python inference/evaluate.py \
     --results /deepfreeze/pnlong/school/cse151b/final/results/public_sft_n4.csv \
     --model "Qwen3-4B" --checkpoint sft --n-samples 4 \
-    --notes "SFT on distilled traces"
+    --notes "SFT on distilled traces; router (Exp 2)"
 ```
 
-**What to report**: MCQ accuracy, free-form accuracy, overall accuracy. Compare to best Experiment 1 result to quantify the SFT gain.
+**Without router ($N = 4$ only; ablation / closer to Exp 1c)**
+
+```bash
+CUDA_VISIBLE_DEVICES=0,3 python inference/infer_parallel.py --gpu --quantize \
+    --model /deepfreeze/pnlong/school/cse151b/final/checkpoints/sft/checkpoint-latest \
+    --n-samples 4 \
+    --data data/public.jsonl \
+    --output /deepfreeze/pnlong/school/cse151b/final/results/public_sft_n4_no_router.csv
+
+python inference/evaluate.py \
+    --results /deepfreeze/pnlong/school/cse151b/final/results/public_sft_n4_no_router.csv \
+    --model "Qwen3-4B" --checkpoint sft --n-samples 4 \
+    --notes "SFT on distilled traces; no router (ablation)"
+```
+
+**Single GPU (either recipe)** — use `infer.py`; add **`--use-router`** for Exp 2, omit it for the no-router ablation.
+
+```bash
+# With router → same outputs as infer_parallel snippet above:
+CUDA_VISIBLE_DEVICES=0 python inference/infer.py --gpu --quantize \
+    --model /deepfreeze/pnlong/school/cse151b/final/checkpoints/sft/checkpoint-latest \
+    --data data/public.jsonl \
+    --n-samples 4 \
+    --use-router \
+    --output /deepfreeze/pnlong/school/cse151b/final/results/public_sft_n4.csv
+
+# Without router → align output path with the no_router CSV name:
+CUDA_VISIBLE_DEVICES=0 python inference/infer.py --gpu --quantize \
+    --model /deepfreeze/pnlong/school/cse151b/final/checkpoints/sft/checkpoint-latest \
+    --data data/public.jsonl \
+    --n-samples 4 \
+    --output /deepfreeze/pnlong/school/cse151b/final/results/public_sft_n4_no_router.csv
+```
+
+**What to report**: MCQ accuracy, free-form accuracy, overall accuracy for the **router** run as Experiment 2. Compare to best Experiment 1 result to quantify the SFT gain.
 
 ---
 
@@ -320,28 +361,51 @@ Defaults mirror ``sft/train.py`` where applicable (epochs, batch/grad-accum, LR,
 
 ### 3b. RL inference + evaluation
 
-Run the RL checkpoint on the public set and compare to both Experiment 1 baselines and the SFT result.
+Run the RL (GRPO) adapter on the public set with the **same inference recipe as Experiment 2d (router + $N = 4$)** and compare to Experiment 1 and SFT.
+
+**Checkpoints**:
+
+- **`checkpoints/rl/checkpoint-best-reward/`** — snapshot when Trainer’s logged **`reward`** improved (**default for Experiment 3**).
+- **`checkpoints/rl/checkpoint-latest`** — pointer/symlink to the last saved step (e.g. after an early stop). Use if you deliberately want weights from the final step regardless of logged reward peaks.
+
+Inference expects a directory that contains a PEFT **`adapter_config.json`** (typically `checkpoint-best-reward/` or resolved `checkpoint-latest`), not bare `checkpoints/rl/` by itself unless that folder is wired as the adapter root.
 
 **Relevant files**:
 - `inference/infer.py`
+- `inference/infer_parallel.py`
 - `inference/evaluate.py`
 - `config.py` — `CHECKPOINTS_DIR`
 
-**How to run**:
+**How to run** — **`checkpoint-best-reward`** + router (matches Exp 3), data-parallel:
+
 ```bash
-CUDA_VISIBLE_DEVICES=0 python inference/infer.py --gpu --quantize \
-    --model /deepfreeze/pnlong/school/cse151b/final/checkpoints/rl \
-    --data data/public.jsonl \
+CUDA_VISIBLE_DEVICES=0,3 python inference/infer_parallel.py --gpu --quantize \
+    --model /deepfreeze/pnlong/school/cse151b/final/checkpoints/rl/checkpoint-best-reward \
     --n-samples 4 \
-    --output /deepfreeze/pnlong/school/cse151b/final/results/public_rl_n4.csv
+    --data data/public.jsonl \
+    --use-router \
+    --output /deepfreeze/pnlong/school/cse151b/final/results/public_grpo_n4_bestreward.csv
 
 python inference/evaluate.py \
-    --results /deepfreeze/pnlong/school/cse151b/final/results/public_rl_n4.csv \
+    --results /deepfreeze/pnlong/school/cse151b/final/results/public_grpo_n4_bestreward.csv \
     --model "Qwen3-4B" --checkpoint rl --n-samples 4 \
-    --notes "GRPO RL from SFT checkpoint"
+    --notes "GRPO from SFT; checkpoint-best-reward; router"
 ```
 
-**What to report**: MCQ accuracy, free-form accuracy, overall accuracy. Compare to Experiment 2d (SFT) and best Experiment 1 baseline.
+**Optional** — final-step adapter instead of best-reward snapshot:
+
+```bash
+CUDA_VISIBLE_DEVICES=0,3 python inference/infer_parallel.py --gpu --quantize \
+    --model /deepfreeze/pnlong/school/cse151b/final/checkpoints/rl/checkpoint-latest \
+    --n-samples 4 \
+    --data data/public.jsonl \
+    --use-router \
+    --output /deepfreeze/pnlong/school/cse151b/final/results/public_grpo_n4_latest.csv
+```
+
+**Single GPU** — same flags on `inference/infer.py` with one visible device.
+
+**What to report**: MCQ accuracy, free-form accuracy, overall accuracy. Compare to Experiment 2d (SFT with router) and best Experiment 1 baseline.
 
 ---
 

@@ -11,6 +11,10 @@ Usage (from ``cse151b/final``):
     micromamba run -n cse151b_competition python analysis/plot_sft_grpo_training.py
     micromamba run -n cse151b_competition python analysis/plot_sft_grpo_training.py \\
         --output scratchpaper/figs/sft_grpo_training.pdf
+
+    # Scatter + moving-average overlay (helps noisy GRPO reward trends):
+    micromamba run -n cse151b_competition python analysis/plot_sft_grpo_training.py \\
+        --scatter --output scratchpaper/figs/sft_grpo_training_scatter.pdf
 """
 
 from __future__ import annotations
@@ -24,6 +28,7 @@ _REPO_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(_REPO_ROOT))
 
 import matplotlib.pyplot as plt
+import numpy as np
 import seaborn as sns
 
 from analysis.plot_style import (
@@ -61,6 +66,33 @@ def load_training_history(path: Path, value_column: str) -> tuple[list[int], lis
     return steps, values
 
 
+def default_ma_window(n_points: int) -> int:
+    """Pick a rolling window size (~1/15 of logged points, min 5)."""
+    if n_points < 2:
+        return 1
+    return max(5, n_points // 15)
+
+
+def compute_moving_average(
+    steps: list[int],
+    values: list[float],
+    *,
+    window: int,
+) -> tuple[list[int], list[float]]:
+    """Rolling mean over the last *window* logged points."""
+    if not steps:
+        return [], []
+
+    window = max(1, min(window, len(values)))
+    ma_steps: list[int] = []
+    ma_values: list[float] = []
+    for i in range(len(values)):
+        start = i - window + 1
+        ma_steps.append(steps[i])
+        ma_values.append(float(np.mean(values[start : i + 1])))
+    return ma_steps, ma_values
+
+
 def plot_metric_panel(
     ax,
     steps: list[int],
@@ -71,9 +103,32 @@ def plot_metric_panel(
     color: str,
     ylim: tuple[float, float] | None = None,
     pending_label: str = "Training pending",
+    scatter: bool = False,
+    ma_window: int | None = None,
 ) -> None:
     if steps and values:
-        ax.plot(steps, values, color=color, linewidth=1.0, alpha=0.9)
+        if scatter:
+            ax.scatter(
+                steps,
+                values,
+                color=color,
+                alpha=0.25,
+                s=12,
+                linewidths=0,
+                zorder=1,
+            )
+            window = ma_window if ma_window is not None else default_ma_window(len(values))
+            ma_steps, ma_values = compute_moving_average(steps, values, window=window)
+            ax.plot(
+                ma_steps,
+                ma_values,
+                color=color,
+                linewidth=2.0,
+                alpha=0.95,
+                zorder=2,
+            )
+        else:
+            ax.plot(steps, values, color=color, linewidth=1.0, alpha=0.9)
         ax.set_xlabel("Global Step", fontsize=AXIS_FS)
         ax.set_ylabel(ylabel, fontsize=AXIS_FS)
         ax.tick_params(axis="both", labelsize=TICK_FS)
@@ -104,6 +159,23 @@ def main() -> None:
     parser.add_argument("--rl-csv", type=Path, default=DEFAULT_RL_CSV)
     parser.add_argument("--output", type=Path, default=DEFAULT_OUTPUT)
     parser.add_argument("--dpi", type=int, default=150)
+    parser.add_argument(
+        "--scatter",
+        action="store_true",
+        help=(
+            "Scatter raw points (alpha=0.25) with a rolling moving-average trend line "
+            "instead of a plain line plot."
+        ),
+    )
+    parser.add_argument(
+        "--ma-window",
+        type=int,
+        default=None,
+        help=(
+            "Rolling window size (in logged points) for --scatter mode "
+            "(default: ~1/15 of points, min 5)."
+        ),
+    )
     args = parser.parse_args()
 
     sft_steps, sft_losses = load_training_history(args.sft_csv, "train_loss")
@@ -115,6 +187,10 @@ def main() -> None:
     fig, (ax_sft, ax_rl) = plt.subplots(
         1, 2, figsize=two_panel_figsize(fig_height=TRAINING_CURVES_FIG_HEIGHT)
     )
+    plot_kwargs = {
+        "scatter": args.scatter,
+        "ma_window": args.ma_window,
+    }
     plot_metric_panel(
         ax_sft,
         sft_steps,
@@ -122,6 +198,7 @@ def main() -> None:
         title="SFT (QLoRA)",
         ylabel="Train Loss",
         color=sft_color,
+        **plot_kwargs,
     )
     plot_metric_panel(
         ax_rl,
@@ -131,6 +208,7 @@ def main() -> None:
         ylabel="Mean Reward",
         color=rl_color,
         ylim=(0.0, 1.05),
+        **plot_kwargs,
     )
 
     fig.tight_layout()
