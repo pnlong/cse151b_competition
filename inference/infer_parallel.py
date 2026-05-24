@@ -10,8 +10,9 @@ Multi-GPU behaviour:
     any existing ``*.shardK.csv`` files, then splits **only the remaining** questions
     across workers (round-robin). Each worker gets a small ``*.shardK.todo.jsonl`` subset.
   - Each shard writes full logs to ``<output-stem>.shard<K>.log`` (next to the CSV shards).
-  - This driver prints a single periodic summary line on the terminal (CSV rows completed
-    per shard vs quota), avoiding interleaved tqdm from multiple workers.
+  - This driver prints a single periodic summary line on the terminal (per-shard
+    completed counts for IDs in **this** shard's ``*.todo.jsonl`` subset vs that
+    quota), avoiding interleaved tqdm from multiple workers.
   - Shard ``*.shardK.csv`` and ``*.shardK.log`` files are **not** deleted after merge
     (kept for resume and debugging); only the merged ``--output`` CSV is written/updated.
 
@@ -43,8 +44,9 @@ from inference.utils import load_jsonl, save_jsonl  # noqa: E402
 
 _INFER_SCRIPT = Path(__file__).resolve().parent / "infer.py"
 
-# Interval between consolidated progress lines on the parent terminal (shard CSV row counts).
+# Interval between consolidated progress lines on the parent terminal.
 _PROGRESS_INTERVAL_SEC = 30 * 60  # 30 minutes
+
 
 # Flags whose values this driver strips from the forwarded argv and rewrites per worker.
 _STRIP_VALUE_FLAGS = frozenset({"--tp", "--num-shards", "--shard-id", "--output", "--data"})
@@ -117,28 +119,25 @@ def _shard_log_path(final: Path, shard_id: int) -> Path:
     return final.parent / f"{final.stem}.shard{shard_id}.log"
 
 
-def _csv_body_row_count(path: Path) -> int:
-    """Number of logical data rows in a submission CSV (excluding header).
-
-    Must use the CSV parser: ``response`` cells often contain newlines, so counting
-    raw text lines massively over-counts (e.g. ``18097/447``).
-    """
-    if not path.exists():
-        return 0
-    with open(path, encoding="utf-8", newline="") as f:
-        reader = csv.reader(f)
-        try:
-            next(reader)  # header: id,response
-        except StopIteration:
-            return 0
-        return sum(1 for _ in reader)
-
 
 def _load_csv_responses(path: Path) -> dict[str, str]:
     if not path.exists():
         return {}
     with open(path, newline="", encoding="utf-8") as f:
         return {str(row["id"]): row["response"] for row in csv.DictReader(f)}
+
+
+def _shard_completed_vs_todo(shard_csv: Path, todo_ids: list[str]) -> int:
+    """Count ``todo_ids`` that already appear in ``shard_csv`` (this run's subset).
+
+    ``*.shard*.csv`` files persist across resumed jobs; naive row totals include
+    questions written under earlier round-robin assignments, unlike ``quotas``
+    which count only IDs in this launch's ``*.todo.jsonl`` shard.
+    """
+    if not shard_csv.exists() or not todo_ids:
+        return 0
+    rsp = _load_csv_responses(shard_csv)
+    return sum(1 for qid in todo_ids if qid in rsp)
 
 
 def _load_dataset_rows(data_path: Path, limit: int | None) -> list[dict]:
@@ -235,12 +234,14 @@ def _spawn_workers(
     procs: list[subprocess.Popen] = []
     log_files: list[object] = []
 
+    shard_todo_id_lists = [[str(r["id"]) for r in rows] for rows in shard_todos]
+
     print(f"[infer_parallel] {n} workers — full logs:")
     for shard_id, phys in enumerate(devices):
         print(f"    shard {shard_id} (CUDA_VISIBLE_DEVICES={phys}): {_shard_log_path(final_output, shard_id)}")
     print(
         f"[infer_parallel] consolidated progress every {_PROGRESS_INTERVAL_SEC / 60:.0f} min "
-        f"(CSV rows done / questions in shard)",
+        f"(IDs completed for this shard's current todo subset / shard quota)",
         flush=True,
     )
 
@@ -250,8 +251,9 @@ def _spawn_workers(
         while True:
             parts = []
             for k in range(n):
-                done = _csv_body_row_count(_shard_path(final_output, k))
-                parts.append(f"s{k}:{done}/{quotas[k]}")
+                q = quotas[k]
+                done = _shard_completed_vs_todo(_shard_path(final_output, k), shard_todo_id_lists[k])
+                parts.append(f"s{k}:{done}/{q}" if q > 0 else f"s{k}:idle")
             print(f"[infer_parallel] {' | '.join(parts)}", flush=True)
             if stop_evt.wait(_PROGRESS_INTERVAL_SEC):
                 break
@@ -296,8 +298,9 @@ def _spawn_workers(
         codes = [p.wait() for p in procs]
         parts = []
         for k in range(n):
-            done = _csv_body_row_count(_shard_path(final_output, k))
-            parts.append(f"s{k}:{done}/{quotas[k]}")
+            q = quotas[k]
+            done = _shard_completed_vs_todo(_shard_path(final_output, k), shard_todo_id_lists[k])
+            parts.append(f"s{k}:{done}/{q}" if q > 0 else f"s{k}:idle")
         print(f"[infer_parallel] final {' | '.join(parts)}", flush=True)
         return codes
     finally:
