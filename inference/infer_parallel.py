@@ -13,8 +13,8 @@ Multi-GPU behaviour:
   - This driver prints a single periodic summary line on the terminal (per-shard
     completed counts for IDs in **this** shard's ``*.todo.jsonl`` subset vs that
     quota), avoiding interleaved tqdm from multiple workers.
-  - Shard ``*.shardK.csv`` and ``*.shardK.log`` files are **not** deleted after merge
-    (kept for resume and debugging); only the merged ``--output`` CSV is written/updated.
+  - After a successful merge, per-shard artifacts (``*.shardK.csv``, ``*.shardK.log``,
+    ``*.shardK.todo.jsonl``) are removed. Failed workers leave shards in place for resume.
 
 Examples:
     CUDA_VISIBLE_DEVICES=0,1,2 python inference/infer_parallel.py --gpu
@@ -216,6 +216,25 @@ def _merge_results(
     _write_final_csv(final_csv, ordered_ids, merged)
 
 
+def _cleanup_shard_artifacts(final_csv: Path, num_shards: int) -> None:
+    """Remove per-shard CSV, log, and todo files next to ``final_csv``."""
+    n_removed = 0
+    for k in range(num_shards):
+        for p in (
+            _shard_path(final_csv, k),
+            _shard_log_path(final_csv, k),
+            _shard_todo_path(final_csv, k),
+        ):
+            try:
+                if p.exists():
+                    p.unlink()
+                    n_removed += 1
+            except OSError:
+                pass
+    if n_removed:
+        print(f"[infer_parallel] removed {n_removed} shard artifact file(s)", flush=True)
+
+
 def _ensure_gpu_flag(forward: list[str]) -> list[str]:
     if "--gpu" in forward:
         return forward
@@ -371,6 +390,7 @@ def main() -> None:
         print("[infer_parallel] nothing to generate — writing merged CSV from existing results")
         _merge_results(final_out, shard_paths, ordered_ids, preload)
         print(f"[infer_parallel] Merged {len(ordered_ids)} rows → {final_out}")
+        _cleanup_shard_artifacts(final_out, n)
         return
 
     codes = _spawn_workers(
@@ -385,6 +405,7 @@ def main() -> None:
 
     _merge_results(final_out, shard_paths, ordered_ids, preload)
     print(f"[infer_parallel] Merged {len(ordered_ids)} rows → {final_out}")
+    _cleanup_shard_artifacts(final_out, n)
 
 
 if __name__ == "__main__":
