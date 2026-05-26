@@ -15,6 +15,7 @@ Paths to the JSONL files come from [`config.py`](../config.py) (via `.env` → `
 
 | Script | Purpose |
 |--------|---------|
+| [`plot_style.py`](plot_style.py) | Shared matplotlib figure sizes / typography (imported by the other plotting scripts). |
 | [`plot_dataset_breakdown.py`](plot_dataset_breakdown.py) | Summarizes **answer format** (MCQ vs free-form single vs multi-`[ANS]`) using `primary_route` on the JSONL fields. **Topic** bars come from either (**default**) the inference router’s `topic_taxonomy.classify_problem` label (same 20-way scoring as the CSV pipeline) via [`RuleBasedRouter`](../inference/router.py), or from **`--source csv`** reading [`data/topic_classifications.csv`](../data/topic_classifications.csv) (offline run of `classify_topics.py`). Prints tables to stdout and optionally saves a **two-panel horizontal bar chart**. |
 | [`plot_sft_grpo_training.py`](plot_sft_grpo_training.py) | Two-panel **SFT loss + GRPO mean reward** figure from `training_loss_history.csv` under `STORAGE_DIR/checkpoints/` (defaults to `scratchpaper/figs/sft_grpo_training.pdf`). GRPO panel shows a placeholder until RL reward logs exist. |
 | [`classify_topics.py`](classify_topics.py) | Offline CLI: writes [`data/topic_classifications.csv`](../data/topic_classifications.csv) with columns `set`, `id`, `topic`. Scoring rules live in repo-root [`topic_taxonomy.py`](../topic_taxonomy.py). |

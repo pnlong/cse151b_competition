@@ -35,8 +35,11 @@ See [`docs/experiments.md`](docs/experiments.md) for every experimental conditio
 ```
 final/
 ├── docs/
-│   ├── experiments.md            All experimental conditions, run commands, and results log
-│   └── pipeline.md               End-to-end pipeline (all stages)
+│   ├── directions.md               Official competition specification and submission rules
+│   ├── experiments.md              All experimental conditions, run commands, and results log
+│   ├── pipeline.md                 End-to-end pipeline (all stages)
+│   ├── game_plan.md                Planning notes / strategy memo
+│   └── project_rules.md            Team conventions and workflow rules
 ├── topic_taxonomy.py             Shared 20-topic classifier (router + classify_topics)
 ├── constants.py                  Project-wide constants (model ID, sampling params, prompts)
 ├── config.py                     Loads .env → ROOT_DIR, STORAGE_DIR, all derived paths
@@ -44,18 +47,28 @@ final/
 ├── judger.py                     Competition-provided answer judging logic — do not modify
 │
 ├── data/
+│   ├── README.md                 Dataset schema (see also topic_classifications.csv)
 │   ├── public.jsonl              1126 problems with ground-truth answers (local eval)
 │   └── private.jsonl             893 problems without answers (leaderboard submission)
 │
+├── analysis/                     Figures and offline dataset utilities → README inside
+│   ├── classify_topics.py        Emit data/topic_classifications.csv from topic_taxonomy
+│   ├── plot_dataset_breakdown.py Format + topic summaries / bar charts
+│   ├── plot_sft_grpo_training.py Loss + RL reward plotting from checkpoint CSV logs
+│   └── README.md
+│
 ├── inference/                    Baseline inference pipeline → README inside
 │   ├── starter.py                Starter-code baseline (Exp 1a) — faithful port of the notebook
-│   ├── infer.py                  Run Qwen3-4B with self-consistency voting → submission CSV
+│   ├── infer.py                  Run Qwen3-4B (+ optional LoRA) with self-consistency → CSV
+│   ├── infer_parallel.py         Data-parallel driver: one infer.py worker per GPU, merge shards
 │   ├── evaluate.py               Score a CSV against public.jsonl using Judger
 │   ├── utils.py                  Inference utilities (extraction, voting, prompt building, I/O)
 │   ├── router.py                 Optional prompt router (format-first + topic refinements)
+│   ├── test_router.py            Router sanity check (no vLLM student model)
 │   └── README.md
 │
-├── prompts/                      System prompts and instruction templates → README inside
+├── prompts/                      Instruction templates → README inside
+│   ├── README.md                 Where routing prompts live vs Claude distillation .md prompts
 │   ├── routing/
 │   │   └── prompts.py            Router prompts (primary + TOPIC_REFINEMENTS)
 │   └── distillation/
@@ -64,17 +77,21 @@ final/
 │
 ├── distill/                      Knowledge distillation pipeline → README inside
 │   ├── collect.py                Run a teacher model, save verified/pseudo-labeled traces
+│   ├── debug_collect.py          Print 1–2 teacher generations (no trace files)
 │   ├── merge.py                  Combine all models' traces into one SFT JSONL dataset
+│   ├── remap_private_ids.py      Re-key trace / CSV ids when private.jsonl ids change (optional)
 │   ├── utils.py                  Distillation utilities (re-exports inference/utils + extras)
 │   └── README.md
 │
 ├── sft/                          Supervised fine-tuning (TRL SFTTrainer, LoRA/QLoRA)
 │   ├── train.py
-│   └── callbacks.py
+│   ├── callbacks.py             Training-loss CSV + PDF plotting (SFT)
+│   └── progress_callbacks.py    Shared checkpoint resolution + RL/SFT plot hooks helpers
 │
 ├── rl/                           GRPO reinforcement learning (TRL GRPOTrainer)
 │   ├── train.py
-│   └── rewards.py                Judger / MCQ outcome rewards
+│   ├── rewards.py               Judger / MCQ outcome rewards
+│   └── callbacks.py             Training-loss / reward CSV + PDF (GRPO)
 │
 ├── scratchpaper/                 Git-ignored notes (optional LaTeX, guides); canonical pipeline → `docs/pipeline.md`
 │
@@ -112,7 +129,9 @@ CUDA_VISIBLE_DEVICES=0 python inference/infer.py --gpu \
 python inference/evaluate.py --results results/public.csv
 ```
 
-See `inference/README.md` for full options including multi-GPU, quantization, and smoke-testing.
+See [`inference/README.md`](inference/README.md) for full options — multi-GPU (tensor parallel or `infer_parallel.py`), quantization, sharding/resume, and smoke-testing.
+
+**Related docs**: [`prompts/README.md`](prompts/README.md) (routing + Claude distillation templates), [`distill/README.md`](distill/README.md), [`analysis/README.md`](analysis/README.md).
 
 ---
 

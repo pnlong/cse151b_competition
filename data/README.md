@@ -52,3 +52,12 @@ Questions can have more than one `[ANS]` slot.
 - Answer values for fill-in-the-blank questions may be symbolic expressions
   (e.g. `"325*(1+325)"`) rather than evaluated numerals — both forms are
   accepted during evaluation.
+
+---
+
+## Auxiliary / derived files
+
+| File | Purpose |
+|------|---------|
+| `topic_classifications.csv` | Rows `{set,id,topic}` from `analysis/classify_topics.py`; optional input for plotting (see `analysis/README.md`). |
+| `private.old.jsonl` | Optional older private split snapshot paired with `distill/remap_private_ids.py` when integer IDs change. Omit from git when large (`gitignore` as needed). |

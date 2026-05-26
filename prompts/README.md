@@ -61,7 +61,7 @@ Run from the repo root. The session is fully autonomous — it reads both data
 splits, fans out solver agents across batches in parallel, and writes results
 to the distillation output directory. No further input needed.
 
-Environment: `mamba activate cse151b_competition`
+Environment: `micromamba activate cse151b_competition`
 
 See [`distillation/teacher.md`](distillation/teacher.md) and
 [`distillation/solver.md`](distillation/solver.md) for full prompt text.

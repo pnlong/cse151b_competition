@@ -120,6 +120,18 @@ Scans all `DISTILL_DIR/*/public_traces.jsonl` (and optionally `private_traces.js
 
 ---
 
+## `remap_private_ids.py` — re-key datasets after private id changes
+
+If `private.jsonl` gains new rows or is reordered, trace JSONLs and inference CSVs keyed by stale integer `id` values stop lining up with the current corpus. ``remap_private_ids.py`` aligns rows by **exact `(question, options)`** tuples (not old ids), rewrites IDs from the canonical `private.jsonl`, updates `collect.py`'s `*.attempted.txt` resume markers, and can optionally rewrite inference result CSVs so `infer.py` resumes only unseen rows.
+
+- **Dry run (default)** — prints planned changes only.
+- **`--apply`** — writes `.bak` backups then updates files.
+- **`--inference-csv`** — includes matching `id,response` submission files.
+
+Defaults pair `data/private.jsonl` (new layout) with `data/private.old.jsonl` when remapping backwards-compatibility snapshots. Full flags are in ``distill/remap_private_ids.py --help``.
+
+---
+
 ## `utils.py` — shared utilities
 
 Re-exports everything from `inference/utils.py` and adds:
