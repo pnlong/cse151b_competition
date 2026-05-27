@@ -42,7 +42,7 @@ CUDA_VISIBLE_DEVICES=0,1,2 python inference/infer_parallel.py --gpu
    - the optional router (`inference/router.py`) that selects a format-first prompt (`fr_single`, `fr_multi`, `mcq_single`) and can append topic refinements from `prompts/routing/prompts.py` keyed by the 20-way `topic_taxonomy` label (same scoring as offline `classify_topics.py`).
    For free-form questions with multiple `[ANS]` slots, a per-question note is injected into the user message instructing the model to produce a single `\boxed{answer_1, answer_2, ...}`.
 3. **Enables thinking mode** via `apply_chat_template(..., enable_thinking=True)` — Qwen3's native chain-of-thought mode, which produces a `<think>...</think>` block before the final answer. The full trace (thinking + answer) is kept as the submission response, since the evaluator extracts `\boxed{}` from anywhere in the text.
-4. **Generates N responses per question** (default N=`constants.DEFAULT_N_SAMPLES`; currently **4**) by repeating each prompt N times in one big vLLM batch. vLLM's prefix cache means the shared prompt tokens are only computed once per unique question.
+4. **Generates N responses per question** (default N=`constants.DEFAULT_N_SAMPLES`; currently **8**) by repeating each prompt N times in one big vLLM batch. vLLM's prefix cache means the shared prompt tokens are only computed once per unique question.
 5. **Votes** using self-consistency: extracts the `\boxed{}` answer from each of the N responses, normalizes lightly for comparison, and picks the plurality answer. The winning response (the full trace) is kept as the final output.
 6. **Writes** a CSV with columns `id` and `response`.
 
@@ -59,7 +59,7 @@ CUDA_VISIBLE_DEVICES=0,1,2 python inference/infer_parallel.py --gpu
 | `--data` | `data/private.jsonl` | Input JSONL |
 | `--output` | `$STORAGE_DIR/results/submission.csv` | Output CSV |
 | `--model` | From `constants.DEFAULT_MODEL` | Hub ID, merged weights dir, or checkpoint tree (latest pass resolved automatically) |
-| `--n-samples` | `4` (`constants.DEFAULT_N_SAMPLES`) | Responses per question |
+| `--n-samples` | `8` (`constants.DEFAULT_N_SAMPLES`) | Responses per question |
 | `--gpu` | off | Enable GPU inference (device set via `CUDA_VISIBLE_DEVICES` externally) |
 | `--tp` | `1` | Tensor-parallel degree (must match number of visible GPUs) |
 | `--quantize` | off | INT8 via bitsandbytes — halves VRAM, ~1.5× slower |

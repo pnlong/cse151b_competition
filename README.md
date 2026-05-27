@@ -1,159 +1,66 @@
 # CSE 151B Spring 2026 — Math Reasoning Competition
 
-Maximize the mathematical reasoning accuracy of **Qwen3-4B** on 893 private math problems spanning high school to graduate level. See [`docs/directions.md`](docs/directions.md) for the full competition spec and submission format.
-
-**Environment**: `micromamba activate cse151b_competition`  (create once with `bash setup.sh`)
+Fine-tuned **Qwen3-4B** (GRPO **`checkpoint-best-reward`**, router, **`N=8`**, no quantization). Full spec: [`docs/directions.md`](docs/directions.md).
 
 ---
 
-## Strategy
+## Reproduce our submission (staff)
 
-1. **Prompt engineering + self-consistency** ✓ built
-2. **Knowledge distillation** ✓ built — collect teacher traces → **SFT** ← *current stage*
-3. **Reinforcement learning (GRPO)** ✓ built — `rl/train.py` from SFT checkpoint
+**Adapter on Hugging Face:** **`p1long/cse151b_competition`** — https://huggingface.co/p1long/cse151b_competition  
 
----
+`run_inference` reads **`adapter_config.json`**, pulls the adapter from Hugging Face, loads the **base** named there from Hub, and applies our LoRA. Sampling defaults are in [`constants.py`](constants.py).
 
-## Experiments
-
-See [`docs/experiments.md`](docs/experiments.md) for every experimental condition, the files it involves, exact reproduction commands, and results logged to `STORAGE_DIR/results/eval_log.csv`.
-
-| Experiment | Description | Status |
-|------------|-------------|--------|
-| 1a | Starter code (notebook baseline) | 🔲 to run |
-| 1b | N=1 greedy, no self-consistency | 🔲 to run |
-| 1c | Single system prompt, N=4 self-consistency | 🔲 to run |
-| 1d | Prompt routing, N=4 self-consistency | 🔲 to run |
-| 1e | Thinking mode off, N=4 self-consistency | 🔲 to run |
-| 2 | Knowledge distillation + SFT | ⚙ pipeline built, training not started |
-| 3 | Reinforcement learning (GRPO) | ⚙ pipeline built, training not started |
-
----
-
-## Repository Layout
-
-```
-final/
-├── docs/
-│   ├── directions.md               Official competition specification and submission rules
-│   ├── experiments.md              All experimental conditions, run commands, and results log
-│   ├── pipeline.md                 End-to-end pipeline (all stages)
-│   ├── game_plan.md                Planning notes / strategy memo
-│   └── project_rules.md            Team conventions and workflow rules
-├── topic_taxonomy.py             Shared 20-topic classifier (router + classify_topics)
-├── constants.py                  Project-wide constants (model ID, sampling params, prompts)
-├── config.py                     Loads .env → ROOT_DIR, STORAGE_DIR, all derived paths
-├── utils.py                      Math answer evaluation helpers (used by judger.py)
-├── judger.py                     Competition-provided answer judging logic — do not modify
-│
-├── data/
-│   ├── README.md                 Dataset schema (see also topic_classifications.csv)
-│   ├── public.jsonl              1126 problems with ground-truth answers (local eval)
-│   └── private.jsonl             893 problems without answers (leaderboard submission)
-│
-├── analysis/                     Figures and offline dataset utilities → README inside
-│   ├── classify_topics.py        Emit data/topic_classifications.csv from topic_taxonomy
-│   ├── plot_dataset_breakdown.py Format + topic summaries / bar charts
-│   ├── plot_sft_grpo_training.py Loss + RL reward plotting from checkpoint CSV logs
-│   └── README.md
-│
-├── inference/                    Baseline inference pipeline → README inside
-│   ├── starter.py                Starter-code baseline (Exp 1a) — faithful port of the notebook
-│   ├── infer.py                  Run Qwen3-4B (+ optional LoRA) with self-consistency → CSV
-│   ├── infer_parallel.py         Data-parallel driver: one infer.py worker per GPU, merge shards
-│   ├── evaluate.py               Score a CSV against public.jsonl using Judger
-│   ├── utils.py                  Inference utilities (extraction, voting, prompt building, I/O)
-│   ├── router.py                 Optional prompt router (format-first + topic refinements)
-│   ├── test_router.py            Router sanity check (no vLLM student model)
-│   └── README.md
-│
-├── prompts/                      Instruction templates → README inside
-│   ├── README.md                 Where routing prompts live vs Claude distillation .md prompts
-│   ├── routing/
-│   │   └── prompts.py            Router prompts (primary + TOPIC_REFINEMENTS)
-│   └── distillation/
-│       ├── teacher.md            Orchestrator prompt for Claude-based distillation
-│       └── solver.md             Sub-agent prompt for batch problem solving
-│
-├── distill/                      Knowledge distillation pipeline → README inside
-│   ├── collect.py                Run a teacher model, save verified/pseudo-labeled traces
-│   ├── debug_collect.py          Print 1–2 teacher generations (no trace files)
-│   ├── merge.py                  Combine all models' traces into one SFT JSONL dataset
-│   ├── remap_private_ids.py      Re-key trace / CSV ids when private.jsonl ids change (optional)
-│   ├── utils.py                  Distillation utilities (re-exports inference/utils + extras)
-│   └── README.md
-│
-├── sft/                          Supervised fine-tuning (TRL SFTTrainer, LoRA/QLoRA)
-│   ├── train.py
-│   ├── callbacks.py             Training-loss CSV + PDF plotting (SFT)
-│   └── progress_callbacks.py    Shared checkpoint resolution + RL/SFT plot hooks helpers
-│
-├── rl/                           GRPO reinforcement learning (TRL GRPOTrainer)
-│   ├── train.py
-│   ├── rewards.py               Judger / MCQ outcome rewards
-│   └── callbacks.py             Training-loss / reward CSV + PDF (GRPO)
-│
-├── scratchpaper/                 Git-ignored notes (optional LaTeX, guides); canonical pipeline → `docs/pipeline.md`
-│
-├── setup.sh                      One-time environment setup (micromamba + pip deps)
-├── .env                          Local directory paths (git-ignored)
-├── .env.example                  Committed template — fill in ROOT_DIR and STORAGE_DIR
-└── starter_code_cse151b_comp.ipynb  Original starter notebook (reference only)
-```
-
-Large artifacts (model weights, generated traces, results CSVs, checkpoints) live in `STORAGE_DIR` defined in `.env` — not in this repo.
-
----
-
-## Quick Start
+**Weights:** **`SUBMISSION_MODEL`** must reference our Hub repo (step 4 below). Adapters and base weights cache under **`HF_CACHE_DIR`** (`config` / `.env`).
 
 ```bash
-# 1. Set up paths
-cp .env.example .env    # fill in ROOT_DIR and STORAGE_DIR
+# 1. Clone this GitHub repo and cd into the root (where setup.sh and run_inference.py live).
 
-# 2. Create environment (first time only)
+# 2. Paths + token (gated models need HF_TOKEN — use a read token if unsure)
+cp .env.example .env
+# Edit .env: ROOT_DIR = absolute path to this clone; STORAGE_DIR = fast disk for cache + outputs + CSV
+
+# 3. Environment (micromamba + PyTorch cu124 + vLLM + deps)
 bash setup.sh
-
-# 3. Activate environment (required — use this shell for all Python commands)
 micromamba activate cse151b_competition
 
-# If you already had an older env and only need SFT training deps:
-#   pip install trl peft datasets matplotlib
+# 4. Our weights (fixed id — no guesswork)
+export SUBMISSION_MODEL=p1long/cse151b_competition
 
-# 4. Run inference on the private test set (submission)
-CUDA_VISIBLE_DEVICES=0 python inference/infer.py --gpu
-
-# 5. Run on public set and evaluate locally
-CUDA_VISIBLE_DEVICES=0 python inference/infer.py --gpu \
-    --data data/public.jsonl --output results/public.csv
-python inference/evaluate.py --results results/public.csv
+# 5. Inference → ${STORAGE_DIR}/results/submission.csv
+CUDA_VISIBLE_DEVICES=0 python run_inference.py
 ```
 
-See [`inference/README.md`](inference/README.md) for full options — multi-GPU (tensor parallel or `infer_parallel.py`), quantization, sharding/resume, and smoke-testing.
+**Call `run_inference()` from Python** (same pipeline and defaults as the CLI):
 
-**Related docs**: [`prompts/README.md`](prompts/README.md) (routing + Claude distillation templates), [`distill/README.md`](distill/README.md), [`analysis/README.md`](analysis/README.md).
+```python
+from run_inference import run_inference
+
+run_inference()  # uses SUBMISSION_MODEL from the bash block above
+# or equivalently:
+# run_inference(model="p1long/cse151b_competition")
+```
+
+Default **input / output**: private set **`config.PRIVATE_DATA`** → **`config.RESULTS_DIR / "submission.csv"`** (i.e. under **`${STORAGE_DIR}`** from `.env`).
+
+Optional: **`export SUBMISSION_MODEL_REVISION=<git_sha>`** to pin a Hub commit.
+
+| | |
+|--|--|
+| **GPU we used** | NVIDIA GeForce RTX 3090 |
+| **Wall-clock** | ~12 h on full **`data/private.jsonl`** |
+
+**Gradescope:** public **GitHub** URL + all teammates on the roster (no weight upload there).
 
 ---
 
-## Root-Level Modules
+## Notes
 
-### `topic_taxonomy.py`
-Shared 20-topic weighted-regex taxonomy: `TOPICS`, `classify(text)`, `classify_problem(question, options)`, and `CANONICAL_TOPIC_ORDER`. Used by `inference/router.py` and `analysis/classify_topics.py` so offline CSV labels match inference-time topic routing.
+- **`run_inference.py`** is the required entry point; it matches **`inference/infer.py`** logic. Recipe **§3c**: [`docs/experiments.md`](docs/experiments.md).
+- **`HF_HOME`** / cache: **`HF_CACHE_DIR`** in **`.env`** (see [`config.py`](config.py)).
+- **`infer_parallel.py`** + flags: [`inference/README.md`](inference/README.md).
 
-### `constants.py`
-All numerical, boolean, and string constants — model ID, sampling parameters, vLLM settings, system prompts. Every script imports defaults from here rather than hardcoding values.
-
-### `prompts/routing/prompts.py`
-Router-oriented prompt library. Defines:
-- Primary, format-driven system prompts (`fr_single`, `fr_multi`, `mcq_single`)
-- Optional `TOPIC_REFINEMENTS` addenda keyed by `topic_taxonomy` labels (20 topics)
-- Optional LLM router prompt (`ROUTER_SYSTEM`) that outputs strict JSON with a `topic` field when using `--router-secondary-llm`
-
-### `config.py`
-Loads `.env` and exposes `ROOT_DIR`, `STORAGE_DIR`, and every derived sub-path used across the project (`PRIVATE_DATA`, `PUBLIC_DATA`, `RESULTS_DIR`, `DISTILL_DIR`, `CHECKPOINTS_DIR`, `HF_CACHE_DIR`). Call `ensure_storage_dirs()` once to initialize the storage layout.
-
-### `utils.py`
-Math answer parsing and normalization helpers shared with `judger.py`: `last_boxed_only_string`, `remove_boxed`, `fix_sqrt`, `fix_fracs`, and related utilities. **Do not modify** — imported by the competition-provided `judger.py`.
-
-### `judger.py`
-Competition-provided answer judging logic. Handles symbolic equivalence, numeric approximation, unit stripping, ordered/unordered list matching, and MCQ scoring. **Do not modify.**
+```
+├── run_inference.py   # submission pipeline
+├── setup.sh           # micromamba env cse151b_competition
+├── config.py, constants.py, inference/, rl/, sft/, docs/, data/
+```

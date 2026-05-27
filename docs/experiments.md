@@ -409,6 +409,49 @@ CUDA_VISIBLE_DEVICES=0,3 python inference/infer_parallel.py --gpu --quantize \
 
 ---
 
+### 3c. Final submission inference (quantize off)
+
+**Canonical reproduction** for the leaderboard / staff rerun is **`run_inference.py`** (Exp **3c**): GRPO **`checkpoint-best-reward`**, **router**, and **`N = 8`** (**`constants.DEFAULT_N_SAMPLES`**), **without** **`--quantize`** — vLLM uses full-precision weights (`enable_prefix_caching=True` unless you override). (§3b’s quantized **`infer_parallel`** examples often use **`N = 4`** for throughput; §3c is the full-precision submission settings.)
+
+**Checkpoint:** **`checkpoint-best-reward`** only (not **`checkpoint-latest`**) unless you intentionally deviate — set **`SUBMISSION_MODEL`** or the **`model=`** argument in **`run_inference()`** to that snapshot (Hub id or absolute path).
+
+**Relevant files**:
+- **`run_inference.py`** — **`run_inference()`** + **`python run_inference.py`**
+- **`inference/infer.py`** — optional CLI parity (must **omit** **`--quantize`** to match §3c)
+- **`config.py`** — **`CHECKPOINTS_DIR`**, **`PRIVATE_DATA`**, **`RESULTS_DIR`**
+
+**Official command (submission)**:
+
+```bash
+micromamba activate cse151b_competition
+CUDA_VISIBLE_DEVICES=0 python run_inference.py
+```
+
+Default output: **`$STORAGE_DIR/results/submission.csv`**. After uploading the adapter to Hugging Face:
+
+```bash
+export SUBMISSION_MODEL=p1long/cse151b_competition
+CUDA_VISIBLE_DEVICES=0 python run_inference.py
+```
+
+**CLI parity on one GPU** (equivalent semantics if flags match **`run_inference()`** defaults):
+
+```bash
+CUDA_VISIBLE_DEVICES=0 python inference/infer.py --gpu \
+    --model "${STORAGE_DIR}/checkpoints/rl/checkpoint-best-reward" \
+    --n-samples 8 \
+    --use-router \
+    --reset \
+    --data data/private.jsonl \
+    --output "${STORAGE_DIR}/results/submission.csv"
+```
+
+**(Do not pass `--quantize` for §3c.)**
+
+**Difference vs §3b examples above:** §3b sample commands use **`--quantize`** with **`infer_parallel.py`** for VRAM and often **`N = 4`** — §3c is the **submission** recipe (**full precision**, **`N = 8`** per **`constants.DEFAULT_N_SAMPLES`**).
+
+---
+
 ## Results Summary
 
 All runs append one row to `STORAGE_DIR/results/eval_log.csv`. The columns are:
@@ -417,4 +460,4 @@ All runs append one row to `STORAGE_DIR/results/eval_log.csv`. The columns are:
 timestamp | model | n_samples | checkpoint | mcq_acc | free_acc | overall_acc | missing | results_file | notes
 ```
 
-Open this file in any spreadsheet to compare all experiments side-by-side. For the final leaderboard submission, run `inference/infer.py` on `data/private.jsonl` using whichever checkpoint (base / sft / rl) achieved the highest `overall_acc` on the public set.
+Open this file in any spreadsheet to compare all experiments side-by-side. For the **leaderboard CSV**, **`python run_inference.py`** (**§3c**) is the endorsed path; equivalently **`inference/infer.py`** on **`data/private.jsonl`** with the same **`checkpoint-best-reward`** + **`--use-router`** + **`N = 8`** (or omit **`--n-samples`** to match **`constants.DEFAULT_N_SAMPLES`**) and **without** **`--quantize`**, picked after validating on the public set.

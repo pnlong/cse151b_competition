@@ -12,7 +12,7 @@ data/public.jsonl          data/private.jsonl
      ▼                           ▼
 ┌─────────────────────────────────────────────┐
 │  STAGE 1: Baseline Inference               │
-│  inference/infer.py  (Qwen3-4B, N=4 vote)  │
+│  inference/infer.py  (Qwen3-4B, N=`DEFAULT_N_SAMPLES` vote)  │
 └─────────────────────────────────────────────┘
      │                           │
      ▼                           │
@@ -47,7 +47,7 @@ data/public.jsonl          data/private.jsonl
                         ▼ RL checkpoint
      ┌─────────────────────────────────────────┐
      │  STAGE 5: Final Inference               │
-     │  inference/infer.py  (N=4 vote)        │
+     │  run_inference.py / infer.py (N=vote default) │
      └─────────────────────────────────────────┘
                         │
                         ▼
@@ -70,12 +70,12 @@ data/public.jsonl          data/private.jsonl
    - Free-form: Qwen3-4B thinking mode, answer in `\boxed{}`
    - Multi-`[ANS]`: comma-separated answers in a single `\boxed{answer_1, answer_2, ...}`
    - MCQ: output only the letter in `\boxed{}`
-3. Generate N=4 responses per question via vLLM (Qwen3-4B-Thinking-2507), `max_tokens=8192`
+3. Generate **`DEFAULT_N_SAMPLES`** responses per question via vLLM (Qwen3-4B-Thinking-2507), `max_tokens=8192`
 4. Self-consistency vote: extract `\boxed{}` answer from each response, take plurality, submit the winning trace
 5. Write results to CSV incrementally every `chunk_size=10` questions; re-running resumes from where it left off (use `--reset` to start over)
 
 **Key inference settings** (in `constants.py`):
-- `DEFAULT_N_SAMPLES = 4` — lower than ideal but necessary for a single 10 GB GPU
+- `DEFAULT_N_SAMPLES` — samples per question for voting (submission default is **8**; use **`--n-samples`** when you need a smaller **N** on tight VRAM)
 - `DEFAULT_MAX_TOKENS = DEFAULT_MAX_SEQ_LEN = 8192` — enough for math reasoning; 32K leaves only ~1 concurrent request in the KV cache
 - `DEFAULT_QUANTIZE_GPU_UTIL = 0.50` — always use `--quantize` for INT8 on a 10 GB GPU
 - `--tp 2` splits the model across both GPUs (tensor parallelism, not data parallelism — required when a model doesn't fit on one GPU)

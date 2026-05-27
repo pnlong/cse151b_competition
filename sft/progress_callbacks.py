@@ -64,9 +64,29 @@ def resolve_base_and_adapter(model_path: Path | str) -> tuple[str, str | None]:
     """If *model_path* is a PEFT adapter dir, return (base_model, adapter_dir).
 
     Otherwise return (hub id or local path, None).
+
+    **Hugging Face Hub:** A ``user/repo`` id is treated as an adapter-only repo if
+    ``adapter_config.json`` exists at repo root; otherwise it is treated as a full
+    model id (vLLM loads it without LoRA).
     """
     raw = str(model_path).strip()
     if is_huggingface_hub_id(raw):
+        revision = os.environ.get("SUBMISSION_MODEL_REVISION", "").strip() or None
+        try:
+            from huggingface_hub import hf_hub_download, snapshot_download
+
+            cfg_path = hf_hub_download(
+                repo_id=raw,
+                filename="adapter_config.json",
+                revision=revision,
+            )
+            meta = json.loads(Path(cfg_path).read_text(encoding="utf-8"))
+            base = meta.get("base_model_name_or_path")
+            if base:
+                adapter_local = snapshot_download(repo_id=raw, revision=revision)
+                return str(base), str(adapter_local)
+        except Exception:
+            pass
         return raw, None
 
     p = Path(raw).expanduser().resolve()
